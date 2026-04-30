@@ -223,6 +223,35 @@
       font-size: 12.5px; color: var(--text-3);
     }
 
+    .sidebar-disclaimer {
+      margin: 0 12px 10px;
+      padding: 11px 13px;
+      border-radius: 9px;
+      background: rgba(251,191,36,0.07);
+      border: 1px solid rgba(251,191,36,0.28);
+      font-size: 11px;
+      color: var(--text-2);
+      line-height: 1.6;
+    }
+    .dark .sidebar-disclaimer {
+      background: rgba(251,191,36,0.05);
+      border-color: rgba(251,191,36,0.18);
+    }
+    .sidebar-disclaimer .disc-title {
+      display: flex; align-items: center; gap: 5px;
+      font-size: 11.5px; font-weight: 700;
+      color: #92400e; margin-bottom: 6px;
+    }
+    .dark .sidebar-disclaimer .disc-title { color: #fbbf24; }
+    .sidebar-disclaimer .disc-row {
+      display: flex; align-items: flex-start; gap: 6px;
+      margin-bottom: 5px; font-size: 11px;
+    }
+    .sidebar-disclaimer .disc-row:last-child { margin-bottom: 0; }
+    .sidebar-disclaimer .disc-icon {
+      flex: 0 0 auto; margin-top: 1px; opacity: 0.7;
+    }
+
     .sidebar-footer {
       padding: 11px 14px;
       border-top: 1px solid var(--border);
@@ -258,16 +287,17 @@
     .chat-header h1 { font-size: 15px; font-weight: 700; color: var(--text-1); }
 
     .header-badge {
-      background: rgba(242,255,92,0.18);
-      border: 1px solid rgba(242,255,92,0.4);
-      color: #7a8400; font-size: 10px; font-weight: 700;
-      padding: 3px 8px; border-radius: 99px;
-      text-transform: uppercase; letter-spacing: 0.4px;
+      background: rgba(242,255,92,0.15);
+      border: 1px solid rgba(242,255,92,0.35);
+      color: #6b7200; font-size: 10px; font-weight: 700;
+      padding: 3px 10px; border-radius: 99px;
+      text-transform: uppercase; letter-spacing: 0.5px;
+      display: flex; align-items: center; gap: 4px;
     }
 
     .dark .header-badge {
       background: rgba(242,255,92,0.10);
-      border-color: rgba(242,255,92,0.22); color: #c8d400;
+      border-color: rgba(242,255,92,0.22); color: #d4e000;
     }
 
     /* ═══ CHAT AREA ═══ */
@@ -285,35 +315,41 @@
     /* ═══ WELCOME ═══ */
     .welcome {
       text-align: center;
-      padding: 48px 20px 32px;
+      padding: 52px 20px 36px;
     }
 
     .welcome-icon {
-      width: 60px; height: 60px; border-radius: 18px;
+      width: 68px; height: 68px; border-radius: 20px;
       background: var(--dark);
-      margin: 0 auto 18px;
+      margin: 0 auto 22px;
       display: flex; align-items: center; justify-content: center;
       overflow: hidden;
-      box-shadow: 0 4px 16px rgba(0,0,0,0.2);
+      box-shadow: 0 6px 24px rgba(0,0,0,0.22), 0 2px 8px rgba(0,0,0,0.12);
     }
 
-    .welcome-icon img { width: 42px; height: 42px; object-fit: contain; }
+    .welcome-icon img { width: 48px; height: 48px; object-fit: contain; }
 
     .welcome h2 {
-      font-size: 24px; font-weight: 800; margin-bottom: 10px;
-      color: var(--text-1); letter-spacing: -0.3px;
+      font-size: 26px; font-weight: 800; margin-bottom: 10px;
+      color: var(--text-1); letter-spacing: -0.5px;
     }
 
     .welcome p {
-      font-size: 14px; color: var(--text-2);
-      max-width: 420px; margin: 0 auto 28px; line-height: 1.65;
+      font-size: 13.5px; color: var(--text-2);
+      max-width: 440px; margin: 0 auto 32px; line-height: 1.7;
+    }
+
+    .chips-label {
+      font-size: 10px; font-weight: 700; text-transform: uppercase;
+      letter-spacing: 0.9px; color: var(--text-3);
+      margin-bottom: 12px;
     }
 
     .example-chips {
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
-      gap: 8px;
-      max-width: 680px;
+      grid-template-columns: 1fr 1fr;
+      gap: 9px;
+      max-width: 700px;
       margin: 0 auto;
       text-align: left;
     }
@@ -321,22 +357,28 @@
     .chip {
       background: var(--bg-card);
       border: 1px solid var(--border);
-      padding: 9px 14px;
-      border-radius: var(--radius-sm);
+      padding: 11px 14px;
+      border-radius: 10px;
       font-size: 12.5px; font-weight: 500; color: var(--text-2);
       cursor: pointer; transition: all var(--transition);
-      display: flex; align-items: center; gap: 8px;
+      display: flex; align-items: center; gap: 10px;
       box-shadow: var(--shadow-sm);
+      line-height: 1.4;
     }
 
     .chip:hover {
       background: var(--accent); color: var(--dark);
       border-color: var(--accent);
-      transform: translateY(-1px);
-      box-shadow: var(--shadow-md);
+      transform: translateY(-2px);
+      box-shadow: 0 4px 14px rgba(210,224,0,0.3);
     }
 
-    .chip i { font-size: 11px; opacity: 0.75; flex: 0 0 auto; }
+    .chip i {
+      font-size: 12px; opacity: 0.7; flex: 0 0 16px;
+      text-align: center;
+    }
+
+    .chip:hover i { opacity: 1; }
 
     /* ═══ MESSAGE ANIMATION ═══ */
     @keyframes msgIn {
@@ -420,10 +462,11 @@
 
     .resp-label {
       font-size: 10px; font-weight: 700;
-      text-transform: uppercase; letter-spacing: 0.8px;
-      color: var(--text-3); margin-bottom: 6px;
+      text-transform: uppercase; letter-spacing: 0.9px;
+      color: var(--text-3); margin-bottom: 7px;
       display: flex; align-items: center; gap: 6px;
     }
+    .resp-label i { opacity: 0.7; font-size: 11px; }
 
     /* ═══ KPI CARDS ═══ */
     .kpi-grid {
@@ -437,6 +480,7 @@
       background: var(--bg-card);
       border: 1px solid var(--border);
       border-radius: var(--radius-sm);
+      border-top: 3px solid var(--border);
       padding: 13px 15px;
       display: flex; flex-direction: column; gap: 5px;
       box-shadow: var(--shadow-sm);
@@ -445,17 +489,19 @@
 
     .kpi-card:hover {
       box-shadow: var(--shadow-md);
-      transform: translateY(-1px);
+      transform: translateY(-2px);
     }
 
     .kpi-card.accent-card {
       border-color: rgba(242,255,92,0.4);
-      background: rgba(242,255,92,0.06);
+      border-top-color: var(--accent);
+      background: rgba(242,255,92,0.05);
     }
 
     .dark .kpi-card.accent-card {
       border-color: rgba(242,255,92,0.2);
-      background: rgba(242,255,92,0.04);
+      border-top-color: var(--accent);
+      background: rgba(242,255,92,0.03);
     }
 
     .kpi-label {
@@ -538,9 +584,10 @@
 
     thead th {
       background: var(--table-head);
-      color: #d1d5db; padding: 9px 12px;
-      text-align: left; font-weight: 600;
-      font-size: 11px; letter-spacing: 0.2px;
+      color: #e5e7eb; padding: 9px 12px;
+      text-align: left; font-weight: 700;
+      font-size: 10.5px; letter-spacing: 0.4px;
+      text-transform: uppercase;
       position: sticky; top: 0; white-space: nowrap;
     }
 
@@ -593,10 +640,15 @@
 
     .analysis-head {
       display: flex; align-items: center; justify-content: space-between;
-      padding: 10px 14px;
-      background: rgba(242,255,92,0.07);
-      border-bottom: 1px solid var(--border);
+      padding: 11px 14px;
+      background: linear-gradient(135deg, rgba(242,255,92,0.1) 0%, rgba(242,255,92,0.04) 100%);
+      border-bottom: 1px solid rgba(242,255,92,0.2);
       cursor: pointer; user-select: none;
+      transition: background var(--transition);
+    }
+
+    .analysis-head:hover {
+      background: linear-gradient(135deg, rgba(242,255,92,0.15) 0%, rgba(242,255,92,0.06) 100%);
     }
 
     .analysis-head-left { display: flex; align-items: center; gap: 9px; }
@@ -698,23 +750,31 @@
 
     /* ═══ TYPING INDICATOR ═══ */
     .typing-indicator {
-      display: flex; align-items: center; gap: 5px;
+      display: flex; flex-direction: column; gap: 8px;
       padding: 4px 0;
     }
 
-    .typing-indicator span {
-      font-size: 13px; font-weight: 500; color: var(--text-2);
+    .typing-dots {
+      display: flex; align-items: center; gap: 6px;
+    }
+
+    .typing-indicator .typing-label {
+      font-size: 13px; font-weight: 600; color: var(--text-1);
+    }
+
+    .typing-indicator .typing-sublabel {
+      font-size: 11px; color: var(--text-3);
+      display: flex; align-items: center; gap: 5px;
     }
 
     .dot {
       width: 5px; height: 5px; border-radius: 50%;
-      background: var(--text-3);
+      background: var(--accent);
       animation: bounce 1.2s infinite ease-in-out;
     }
 
-    .dot:nth-child(3) { animation-delay: 0.15s; }
-    .dot:nth-child(4) { animation-delay: 0.3s; }
-    .dot:nth-child(5) { animation-delay: 0.45s; }
+    .dot:nth-child(2) { animation-delay: 0.15s; }
+    .dot:nth-child(3) { animation-delay: 0.3s; }
 
     @keyframes bounce {
       0%, 60%, 100% { transform: translateY(0); opacity: 0.4; }
@@ -870,6 +930,13 @@
 
     <div class="history-body" id="history-body"></div>
 
+    <div class="sidebar-disclaimer">
+      <div class="disc-title"><i class="fas fa-triangle-exclamation"></i> Disclaimer</div>
+      <div class="disc-row"><i class="fas fa-circle-info disc-icon"></i><span>Results may not be fully accurate. Please verify before making decisions.</span></div>
+      <div class="disc-row"><i class="fas fa-clock disc-icon"></i><span>Responses may take <strong>2–3 minutes</strong> to generate.</span></div>
+      <div class="disc-row"><i class="fas fa-arrows-rotate disc-icon"></i><span>Each question is handled separately — include all details in your prompt.</span></div>
+    </div>
+
     <div class="sidebar-footer">
       <div class="status-dot"></div>
       Connected to prod-db-read
@@ -881,7 +948,7 @@
     <div class="chat-header">
       <div class="chat-header-left">
         <h1>Analytics Assistant</h1>
-        <span class="header-badge">GPT-4.1 Powered</span>
+        <span class="header-badge"><i class="fas fa-bolt" style="font-size:9px;"></i> GPT-4.1 Powered</span>
       </div>
       <div style="display:flex;gap:8px;">
         <button class="btn-icon" onclick="exportChat()" title="Export chat">
@@ -947,12 +1014,12 @@ function updateThemeIcon() {
 // WELCOME SCREEN
 // ═══════════════════════════════════════════════════════
 const EXAMPLE_QUESTIONS = [
-  { icon: "fa-chart-bar",   text: "Revenue overview for 2025" },
-  { icon: "fa-coins",       text: "GMV last month" },
-  { icon: "fa-credit-card", text: "POS transactions this year" },
-  { icon: "fa-store",       text: "Top 10 merchants by volume" },
-  { icon: "fa-percent",     text: "What is MDR?" },
-  { icon: "fa-calendar",    text: "Monthly trend for GMV 2025" },
+  { icon: "fa-store-slash",  text: "pos non transacting merchants 2026" },
+  { icon: "fa-wifi-slash",   text: "ipg non transacting merchants 2026" },
+  { icon: "fa-filter",       text: "POS merchants with less than 350k in transactions last month" },
+  { icon: "fa-calendar-alt", text: "Monthly GMV trend - 2026" },
+  { icon: "fa-trophy",       text: "Top 10 merchants by volume" },
+  { icon: "fa-coins",        text: "Top 10 merchants by GMV" },
 ];
 
 function renderWelcome() {
@@ -968,6 +1035,7 @@ function renderWelcome() {
       <div class="welcome-icon"><img src="static/logo.png" alt="WEBXPAY"></div>
       <h2>How can I help you today?</h2>
       <p>Ask me anything about your payment data — revenue, GMV, MDR, transactions, merchants, and trends.</p>
+      <div class="chips-label">Try asking</div>
       <div class="example-chips">${chips}</div>
     </div>
   `;
@@ -1780,8 +1848,10 @@ function addThinking() {
     <div class="avatar ai"><img src="static/logo.png" alt="AI"></div>
     <div class="bubble ai">
       <div class="typing-indicator">
-        <span>Analyzing</span>
-        <div class="dot"></div><div class="dot"></div><div class="dot"></div>
+        <div class="typing-dots">
+          <span class="typing-label">Analyzing</span>
+          <div class="dot"></div><div class="dot"></div><div class="dot"></div>
+        </div>
       </div>
     </div>
   `;

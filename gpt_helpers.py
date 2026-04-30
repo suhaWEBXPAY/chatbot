@@ -1,4 +1,5 @@
 from openai import OpenAI
+from dotenv import load_dotenv
 import os
 import re
 import json
@@ -11,7 +12,9 @@ from concurrent.futures import ThreadPoolExecutor
 # =========================================================
 # NOTE: Do NOT hardcode API keys in code. Use an environment variable instead.
 # export OPENAI_API_KEY="..."
-api_key = os.getenv("OPENAI_API_KEY")
+load_dotenv()
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
 
 # =========================================================
 # SCHEMA LOADER
@@ -1783,11 +1786,11 @@ WHERE o.payment_status_id = 2
         de = intent.get("date_end")
         if not ds or not de:
             ds, de = get_period_from_question(question)
-        today_str = datetime.now().strftime("%Y-%m-%d")
+        today_exclusive = (datetime.now().date() + timedelta(days=1)).strftime("%Y-%m-%d")
         ipg_date = ""
         pos_date = ""
         if ds and de:
-            effective_de = de if de < today_str else today_str
+            effective_de = de if de < today_exclusive else today_exclusive
             ipg_date = f"AND p.date_time_transaction >= '{ds}' AND p.date_time_transaction < '{effective_de}'"
             pos_date = f"AND t.transaction_date >= '{ds}' AND t.transaction_date < '{effective_de}'"
 
@@ -1797,28 +1800,46 @@ WHERE o.payment_status_id = 2
 
         if is_pos_channel and not is_ipg_channel:
             return f"""
+WITH valid_pos AS (
+    SELECT
+        t.store_id
+    FROM webxpay_master.tbl_pos_transactions t
+    WHERE t.ipg_provider_id IN (5, 6)
+      AND t.currency = 'LKR'
+      {pos_date}
+    GROUP BY
+        t.store_id,
+        t.invoice_no,
+        t.auth_code,
+        t.rrn,
+        t.terminal_id,
+        t.terminal_sn,
+        DATE(t.transaction_date)
+    HAVING COUNT(*) = 1
+       AND MAX(LOWER(TRIM(COALESCE(t.txn_type, '')))) NOT IN (
+           'void_sale',
+           'void-sale',
+           'void_amex',
+           'void-amex',
+           ''
+       )
+)
 SELECT
     s.doing_business_name AS merchant_name,
     s.store_id
 FROM webxpay_master.tbl_store s
 INNER JOIN (
-    SELECT DISTINCT store_id FROM webxpay_master.tbl_pos_store_bank_mid WHERE is_active = 1
-) pos_enroll ON pos_enroll.store_id = s.store_id
+    SELECT DISTINCT store_id
+    FROM webxpay_master.tbl_pos_store_bank_mid
+    WHERE is_active = 1
+) m ON m.store_id = s.store_id
+LEFT JOIN (
+    SELECT DISTINCT store_id
+    FROM valid_pos
+) v ON v.store_id = s.store_id
 WHERE s.free_trail = 0
   AND s.is_active = 1
-  AND NOT EXISTS (
-      SELECT 1
-      FROM (
-          SELECT CONCAT(t.invoice_no,'|',t.auth_code,'|',t.rrn,'|',t.terminal_id,'|',t.terminal_sn) AS pair_key
-          FROM webxpay_master.tbl_pos_transactions t
-          WHERE t.store_id = s.store_id
-            AND t.ipg_provider_id IN (5, 6)
-            AND t.currency = 'LKR'
-            AND LOWER(TRIM(COALESCE(t.txn_type,''))) NOT IN ('void_sale','void-sale','void_amex','void-amex')
-            {pos_date}
-          GROUP BY pair_key
-      ) _valid
-  )
+  AND v.store_id IS NULL
 ORDER BY s.doing_business_name;
 """.strip()
 
@@ -1826,22 +1847,33 @@ ORDER BY s.doing_business_name;
         if is_ipg_channel and not is_pos_channel:
             return f"""
 SELECT
-    s.doing_business_name AS merchant_name,
-    s.store_id
+    s.store_id,
+    s.doing_business_name                        AS merchant_name,
+    last_txn.last_successful_transaction_date,
+    'IPG Non-Transacting'                        AS status
 FROM webxpay_master.tbl_store s
 INNER JOIN (
-    SELECT DISTINCT store_id FROM webxpay_master.tbl_store_payment_gateway_2 WHERE is_active = 1
+    SELECT DISTINCT store_id
+    FROM webxpay_master.tbl_store_payment_gateway_2
+    WHERE is_active = 1
 ) ipg_enroll ON ipg_enroll.store_id = s.store_id
+LEFT JOIN (
+    SELECT DISTINCT o.store_id
+    FROM webxpay_master.tbl_order o
+    JOIN webxpay_master.tbl_payment p ON p.payment_id = o.payment_id
+    WHERE o.payment_status_id = 2
+      {ipg_date}
+) did_txn ON did_txn.store_id = s.store_id
+LEFT JOIN (
+    SELECT o.store_id, MAX(p.date_time_transaction) AS last_successful_transaction_date
+    FROM webxpay_master.tbl_order o
+    JOIN webxpay_master.tbl_payment p ON p.payment_id = o.payment_id
+    WHERE o.payment_status_id = 2
+    GROUP BY o.store_id
+) last_txn ON last_txn.store_id = s.store_id
 WHERE s.free_trail = 0
   AND s.is_active = 1
-  AND NOT EXISTS (
-      SELECT 1
-      FROM webxpay_master.tbl_order o
-      JOIN webxpay_master.tbl_payment p ON p.payment_id = o.payment_id
-      WHERE o.store_id = s.store_id
-        AND o.payment_status_id = 2
-        {ipg_date}
-  )
+  AND did_txn.store_id IS NULL
 ORDER BY s.doing_business_name;
 """.strip()
 
@@ -2015,7 +2047,7 @@ WHERE {base_where};
         return f"""
 SELECT COUNT(DISTINCT s.store_id) AS active_merchants_pos
 FROM webxpay_master.tbl_store s
-INNER JOIN (SELECT DISTINCT store_id FROM webxpay_master.tbl_pos_store_bank_mid WHERE is_active = 1) p
+INNER JOIN (SELECT DISTINCT store_id FROM webxpay_master.tbl_pos_store_bank_mid) p
     ON p.store_id = s.store_id
 WHERE {base_where};
 """.strip()
@@ -2034,7 +2066,7 @@ SELECT
 FROM webxpay_master.tbl_store s
 LEFT JOIN (SELECT DISTINCT store_id FROM webxpay_master.tbl_store_payment_gateway_2) g
     ON g.store_id = s.store_id
-LEFT JOIN (SELECT DISTINCT store_id FROM webxpay_master.tbl_pos_store_bank_mid WHERE is_active = 1) p
+LEFT JOIN (SELECT DISTINCT store_id FROM webxpay_master.tbl_pos_store_bank_mid) p
     ON p.store_id = s.store_id
 WHERE {base_where};
 """.strip()
@@ -2484,9 +2516,11 @@ Today: {_today}. Current year {_current_year} is YTD only (data up to {_ytd_labe
 {_row_count_note}
 
 COLUMN NAMING RULES — read column names carefully before writing insights:
-- Columns starting with `ipg_` are IPG-only (ipg_gmv_lkr, ipg_revenue_lkr, ipg_txn_volume, ipg_mdr_lkr, ipg_volume). NEVER label these "total GMV" — call them "IPG GMV", "IPG revenue", etc.
+- Columns starting with `ipg_` are IPG-only (ipg_gmv_lkr, ipg_revenue_lkr, ipg_txn_volume, ipg_mdr_lkr, ipg_volume). NEVER label these "total GMV" or "all channels" — call them "IPG GMV", "IPG revenue", "IPG volume", etc.
 - Columns starting with `pos_` are POS-only (pos_gmv_lkr, pos_total_revenue_lkr, pos_volume, pos_hnb_revenue_lkr, pos_dfcc_revenue_lkr).
 - Columns starting with `combined_` or `total_` cover both channels (combined_gmv_lkr, combined_revenue_lkr, combined_volume). Only use the word "total" or "combined" when these columns exist in the data.
+- IPG volume means approved IPG transactions only. Use `approved_count`, `ipg_volume`, or `ipg_txn_volume` for approved transaction totals; use `declined_count` only when explicitly saying "declined". NEVER add approved and declined counts together and call that IPG volume or IPG transactions.
+- Only discuss channels and metrics that appear in the provided DATA. If POS columns are absent, do not mention POS. If combined/total columns are absent, do not call IPG-only or POS-only values "total" or "all channels".
 - If only `ipg_*` columns are present, describe everything as IPG figures only.
 - If only `pos_*` columns are present, describe everything as POS figures only.
 - Use "Revenue" not "profit".
@@ -2667,8 +2701,10 @@ def detect_high_level_mode(question: str) -> str | None:
         "why","explain","reason","merchant contribution",
         "revenue per transaction","WEBXPAY",
     ]
-    if any(k in ql for k in overview_keywords):
-        return "period_overview"
+    for keyword in overview_keywords:
+        pattern = r"(?<![a-z0-9])" + re.escape(keyword.lower()) + r"(?![a-z0-9])"
+        if re.search(pattern, ql):
+            return "period_overview"
 
     return None
 
@@ -2782,7 +2818,7 @@ SELECT
     ), 2
   ) AS `ipg_revenue_lkr`,
 
-  COUNT(o.order_id) AS `ipg_volume`,
+  SUM(CASE WHEN o.payment_status_id = 2 THEN 1 ELSE 0 END) AS `ipg_volume`,
   COUNT(DISTINCT o.store_id) AS `unique_merchants`,
   SUM(CASE WHEN o.payment_status_id = 2 THEN 1 ELSE 0 END) AS `approved_count`,
   SUM(CASE WHEN o.payment_status_id = 3 THEN 1 ELSE 0 END) AS `declined_count`,
@@ -2881,7 +2917,7 @@ ORDER BY onboard_date DESC;
     if is_pos and not is_ipg:
         channel_join = """
 JOIN (
-    SELECT DISTINCT store_id FROM webxpay_master.tbl_pos_store_bank_mid WHERE is_active = 1
+    SELECT DISTINCT store_id FROM webxpay_master.tbl_pos_store_bank_mid
 ) ch ON ch.store_id = s.store_id"""
     elif is_ipg and not is_pos:
         channel_join = """
@@ -2894,7 +2930,7 @@ JOIN (
 JOIN (
     SELECT DISTINCT store_id FROM webxpay_master.tbl_store_payment_gateway_2 WHERE is_active = 1
     UNION
-    SELECT DISTINCT store_id FROM webxpay_master.tbl_pos_store_bank_mid WHERE is_active = 1
+    SELECT DISTINCT store_id FROM webxpay_master.tbl_pos_store_bank_mid
 ) ch ON ch.store_id = s.store_id"""
 
     # Detect if user wants a list or just a count
@@ -2949,7 +2985,7 @@ def build_merchant_onboarding_timeseries_sql(question: str, ds: str, de: str, gr
     if is_pos and not is_ipg:
         channel_join = """
 JOIN (
-    SELECT DISTINCT store_id FROM webxpay_master.tbl_pos_store_bank_mid WHERE is_active = 1
+    SELECT DISTINCT store_id FROM webxpay_master.tbl_pos_store_bank_mid
 ) ch ON ch.store_id = s.store_id"""
     elif is_ipg and not is_pos:
         channel_join = """
@@ -2961,7 +2997,7 @@ JOIN (
 JOIN (
     SELECT DISTINCT store_id FROM webxpay_master.tbl_store_payment_gateway_2 WHERE is_active = 1
     UNION
-    SELECT DISTINCT store_id FROM webxpay_master.tbl_pos_store_bank_mid WHERE is_active = 1
+    SELECT DISTINCT store_id FROM webxpay_master.tbl_pos_store_bank_mid
 ) ch ON ch.store_id = s.store_id"""
 
     return f"""
@@ -3009,7 +3045,6 @@ LEFT JOIN (
 LEFT JOIN (
     SELECT DISTINCT store_id
     FROM webxpay_master.tbl_pos_store_bank_mid
-    WHERE is_active = 1
 ) pos ON s.store_id = pos.store_id
 WHERE {where_clause}
   AND s.free_trail = 0
@@ -3045,7 +3080,6 @@ LEFT JOIN (
 LEFT JOIN (
     SELECT DISTINCT store_id
     FROM webxpay_master.tbl_pos_store_bank_mid
-    WHERE is_active = 1
 ) pos ON s.store_id = pos.store_id
 WHERE {where_clause}
   AND s.free_trail = 0
@@ -3174,6 +3208,24 @@ ORDER BY {bucket} ASC;
 
 
 # ✅ ADD (FIX): a single summary row for UI tables, WITHOUT overwriting the raw_result dict
+def _as_float(value):
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return value
+
+
+def _as_int(value):
+    if value is None or value == "":
+        return None
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return value
+
+
 def build_overview_table_row(overview_result: dict) -> list[dict]:
     try:
         ds = overview_result.get("period", {}).get("date_from")
@@ -3188,19 +3240,19 @@ def build_overview_table_row(overview_result: dict) -> list[dict]:
         # -----------------------------
         # IPG (online gateway) — explicit
         # -----------------------------
-        ipg_revenue_lkr = rev0.get("total_revenue_lkr")
-        ipg_gmv_lkr = gmv0.get("total_gmv_lkr") or rev0.get("total_gmv_lkr")
-        ipg_txn_volume = vol0.get("total_volume") or vol0.get("txn_volume")
-        ipg_mdr_lkr = mdr0.get("total_mdr_lkr")
+        ipg_revenue_lkr = _as_float(rev0.get("total_revenue_lkr"))
+        ipg_gmv_lkr = _as_float(gmv0.get("total_gmv_lkr") or rev0.get("total_gmv_lkr"))
+        ipg_txn_volume = _as_int(vol0.get("total_volume") or vol0.get("txn_volume"))
+        ipg_mdr_lkr = _as_float(mdr0.get("total_mdr_lkr"))
 
         # -----------------------------
         # POS (CHANGED: dfcc + hnb, not amex)
         # -----------------------------
-        pos_gmv_lkr = pos0.get("GMV_LKR") or pos0.get("pos_gmv_lkr")
-        pos_txn_count = pos0.get("Transaction_Count") or pos0.get("pos_volume")
-        pos_dfcc_rev = pos0.get("DFCC_POS_revenue") or pos0.get("pos_dfcc_revenue_lkr")
-        pos_hnb_rev = pos0.get("HNB_POS_revenue") or pos0.get("pos_hnb_revenue_lkr")
-        pos_total_rev = pos0.get("Total_Revenue") or pos0.get("pos_total_revenue_lkr")
+        pos_gmv_lkr = _as_float(pos0.get("GMV_LKR") or pos0.get("pos_gmv_lkr"))
+        pos_txn_count = _as_int(pos0.get("Transaction_Count") or pos0.get("pos_volume"))
+        pos_dfcc_rev = _as_float(pos0.get("DFCC_POS_revenue") or pos0.get("pos_dfcc_revenue_lkr"))
+        pos_hnb_rev = _as_float(pos0.get("HNB_POS_revenue") or pos0.get("pos_hnb_revenue_lkr"))
+        pos_total_rev = _as_float(pos0.get("Total_Revenue") or pos0.get("pos_total_revenue_lkr"))
 
         return [{
             "period_from": ds,
@@ -3221,6 +3273,63 @@ def build_overview_table_row(overview_result: dict) -> list[dict]:
         }]
     except Exception:
         return []
+
+
+def _drop_empty_values(row: dict) -> dict:
+    return {
+        key: value
+        for key, value in row.items()
+        if value is not None
+    }
+
+
+def _compact_rows_for_insights(rows) -> list[dict]:
+    if not isinstance(rows, list):
+        return []
+    return [_drop_empty_values(row) for row in rows if isinstance(row, dict)]
+
+
+def _merge_overview_timeseries_rows(timeseries: dict) -> list[dict]:
+    if not isinstance(timeseries, dict):
+        return []
+
+    grain = timeseries.get("grain")
+    key_map = {"day": "day", "week": "year_week", "month": "year_month"}
+    key_col = key_map.get(grain)
+    if not key_col:
+        return []
+
+    ipg_rows = timeseries.get("ipg") if isinstance(timeseries.get("ipg"), list) else []
+    pos_rows = timeseries.get("pos") if isinstance(timeseries.get("pos"), list) else []
+    merged = {}
+
+    def ensure(key):
+        if key not in merged:
+            merged[key] = {key_col: key}
+        return merged[key]
+
+    for row in ipg_rows:
+        key = row.get(key_col)
+        if key is not None:
+            ensure(key).update(_drop_empty_values(row))
+
+    for row in pos_rows:
+        key = row.get(key_col)
+        if key is not None:
+            ensure(key).update(_drop_empty_values(row))
+
+    out = []
+    for key in sorted(merged):
+        row = merged[key]
+        if "ipg_gmv_lkr" in row or "pos_gmv_lkr" in row:
+            row["combined_gmv_lkr"] = float(row.get("ipg_gmv_lkr") or 0) + float(row.get("pos_gmv_lkr") or 0)
+        if "ipg_revenue_lkr" in row or "pos_total_revenue_lkr" in row:
+            row["combined_revenue_lkr"] = float(row.get("ipg_revenue_lkr") or 0) + float(row.get("pos_total_revenue_lkr") or 0)
+        if "ipg_volume" in row or "pos_volume" in row:
+            row["combined_volume"] = int(row.get("ipg_volume") or 0) + int(row.get("pos_volume") or 0)
+        out.append(row)
+
+    return out
 
 
 def choose_grain_for_overview(question: str, ds: str, de: str) -> str | None:
@@ -3360,10 +3469,6 @@ def handle_period_overview(question: str, sql_executor):
             "pos": pos_ts_rows,
         }
 
-    insights = generate_insights(
-        f"{question} (period {ds} to {de})", overview_result
-    )
-
     sql_block = {
         "revenue": revenue_sql,
         "gmv": gmv_sql,
@@ -3379,12 +3484,23 @@ def handle_period_overview(question: str, sql_executor):
     # ✅ FIX: Provide a separate UI-friendly single-row table without losing raw_result/timeseries
     table_result = build_overview_table_row(overview_result)
 
+    if grain:
+        insight_rows = _merge_overview_timeseries_rows(overview_result.get("timeseries"))
+        if not insight_rows:
+            insight_rows = table_result
+    else:
+        insight_rows = table_result
+
+    insights = generate_insights(
+        f"{question} (period {ds} to {de}; use only the provided DATA columns)",
+        _compact_rows_for_insights(insight_rows),
+    )
 
     return {
         "question": question,
         "sql": sql_block,
 
-        # keep the FULL dict so the LLM sees timeseries and can do monthly/weekly/daily trends
+        # Keep the full raw dict for debugging/API consumers; insights use the displayed rows above.
         "raw_result": overview_result,
 
         # UI can show this as the summary row (like your current "Query results" table)
