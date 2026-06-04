@@ -12,7 +12,7 @@ from concurrent.futures import ThreadPoolExecutor
 # =========================================================
 # NOTE: Do NOT hardcode API keys in code. Use an environment variable instead.
 # export OPENAI_API_KEY="..."
-load_dotenv()
+load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 
@@ -205,8 +205,17 @@ def fuzzy_months(q: str):
     ql = q.lower()
     words = re.findall(r"[a-zA-Z]+", ql)
     months = []
+    fuzzy_stopwords = {
+        "many", "merchant", "merchants", "payment", "payments", "gateway",
+        "gateways", "transaction", "transactions", "active",
+    }
     for w in words:
-        match = difflib.get_close_matches(w, MONTHS.keys(), n=1, cutoff=0.7)
+        if w in MONTHS:
+            months.append(MONTHS[w])
+            continue
+        if w in fuzzy_stopwords or len(w) < 5:
+            continue
+        match = difflib.get_close_matches(w, MONTHS.keys(), n=1, cutoff=0.78)
         if match:
             months.append(MONTHS[match[0]])
     return sorted(set(months))
@@ -2072,6 +2081,228 @@ WHERE {base_where};
 """.strip()
 
 
+def _is_active_transacting_merchant_query(question: str) -> bool:
+    """
+    Detect requests for merchants that were active by transaction activity.
+    This intentionally runs before overview/POS summary routing so requests like
+    "active merchant names in POS and IPG" return merchant rows, not KPI totals.
+    """
+    ql = question.lower()
+    has_merchant_word = re.search(r"\b(merchant|merchants|store|stores)\b", ql) is not None
+    if not has_merchant_word:
+        return False
+
+    non_txn_terms = [
+        "non transacting", "non-transacting", "not transacting", "no transaction",
+        "zero transaction", "haven't transacted", "not transacted", "no transact",
+        "dormant merchant", "inactive merchant", "zero transact",
+    ]
+    if any(term in ql for term in non_txn_terms):
+        return False
+
+    active_terms = [
+        "active", "transacting", "transacted", "processed transaction",
+        "processed transactions", "had transaction", "had transactions",
+    ]
+    if not any(term in ql for term in active_terms):
+        return False
+
+    channel_terms = ["pos", "point of sale", "ipg", "online gateway", "internet payment", "both"]
+    detail_terms = [
+        "name", "names", "list", "show", "give me", "which", "who",
+        "details", "all", "count", "how many", "number of", "total",
+    ]
+    return any(term in ql for term in channel_terms + detail_terms)
+
+
+def _active_merchant_count_requested(question: str) -> bool:
+    ql = question.lower()
+    count_terms = ["how many", "count", "number of", "total number", "total active"]
+    list_terms = ["name", "names", "list", "show", "which", "who", "details"]
+    return any(term in ql for term in count_terms) and not any(term in ql for term in list_terms)
+
+
+def _active_merchant_filter_type(question: str) -> str:
+    ql = question.lower()
+    has_pos = "pos" in ql or "point of sale" in ql
+    has_ipg = "ipg" in ql or "online gateway" in ql or "internet payment" in ql
+
+    if "ipg only" in ql:
+        return "ipg_only"
+    if "pos only" in ql:
+        return "pos_only"
+
+    asks_all_channel_classes = (
+        re.search(r"\bpos\s*,\s*ipg\b", ql) is not None
+        or re.search(r"\bipg\s*,\s*pos\b", ql) is not None
+        or "pos, ipg" in ql
+        or "ipg, pos" in ql
+    )
+    asks_both_only = any(term in ql for term in [
+        "with both", "have both", "has both", "using both",
+        "both channels", "both channel", "both pos and ipg", "both ipg and pos",
+        "ipg and pos merchants", "pos and ipg merchants",
+    ])
+
+    if asks_both_only and not asks_all_channel_classes:
+        return "both"
+    if has_pos and has_ipg:
+        return "all"
+    if has_pos:
+        return "pos"
+    if has_ipg:
+        return "ipg"
+    return "all"
+
+
+def build_active_transacting_merchants_sql(question: str, ds: str = None, de: str = None) -> str:
+    """
+    Returns merchants with successful transaction activity in the selected period.
+
+    IPG activity: approved orders (payment_status_id = 2).
+    POS activity: unvoided LKR sale/amex transactions for HNB/DFCC providers.
+    Merchant status: active, non-trial stores only.
+    """
+    if not ds or not de:
+        ds, de = get_period_from_question(question)
+
+    filter_type = _active_merchant_filter_type(question)
+    want_count = _active_merchant_count_requested(question)
+
+    ipg_date = ""
+    pos_date = ""
+    pos_date_inner = ""
+    if ds and de:
+        ipg_date = f"AND p.date_time_transaction >= '{ds}' AND p.date_time_transaction < '{de}'"
+        pos_date = f"AND t.transaction_date >= '{ds}' AND t.transaction_date < '{de}'"
+        pos_date_inner = f"AND transaction_date >= '{ds}' AND transaction_date < '{de}'"
+
+    ipg_sub = f"""
+    SELECT
+        o.store_id,
+        COUNT(*) AS ipg_transaction_count
+    FROM webxpay_master.tbl_order o
+    JOIN webxpay_master.tbl_payment p ON p.payment_id = o.payment_id
+    WHERE o.payment_status_id = 2
+      {ipg_date}
+    GROUP BY o.store_id
+""".strip()
+
+    pk_inner = """CONCAT(
+            COALESCE(TRIM(CAST(invoice_no  AS CHAR)),''),'|',
+            COALESCE(TRIM(CAST(auth_code   AS CHAR)),''),'|',
+            COALESCE(TRIM(rrn),''),'|',
+            COALESCE(TRIM(CAST(terminal_id AS CHAR)),''),'|',
+            COALESCE(TRIM(CAST(terminal_sn AS CHAR)),'')
+        )"""
+
+    pair_key_t = """CONCAT(
+        COALESCE(TRIM(CAST(t.invoice_no  AS CHAR)),''),'|',
+        COALESCE(TRIM(CAST(t.auth_code   AS CHAR)),''),'|',
+        COALESCE(TRIM(t.rrn),''),'|',
+        COALESCE(TRIM(CAST(t.terminal_id AS CHAR)),''),'|',
+        COALESCE(TRIM(CAST(t.terminal_sn AS CHAR)),'')
+    )"""
+
+    pos_sub = f"""
+    SELECT
+        t.store_id,
+        MIN(NULLIF(TRIM(t.merchant_name), '')) AS pos_merchant_name,
+        COUNT(*) AS pos_transaction_count
+    FROM webxpay_master.tbl_pos_transactions t
+    LEFT JOIN (
+        SELECT ipg_provider_id, pair_key
+        FROM (
+            SELECT
+                ipg_provider_id,
+                {pk_inner} AS pair_key,
+                LOWER(TRIM(COALESCE(txn_type,''))) AS txn_norm
+            FROM webxpay_master.tbl_pos_transactions
+            WHERE ipg_provider_id IN (5, 6) {pos_date_inner}
+        ) _pas
+        GROUP BY ipg_provider_id, pair_key
+        HAVING SUM(CASE WHEN txn_norm IN ('sale','amex') THEN 1 ELSE 0 END) > 0
+           AND SUM(CASE WHEN txn_norm IN ('','void_sale','void_amex','void-sale','void-amex') THEN 1 ELSE 0 END) > 0
+    ) pk_as
+        ON  t.ipg_provider_id = pk_as.ipg_provider_id
+        AND {pair_key_t} = pk_as.pair_key
+    WHERE t.ipg_provider_id IN (5, 6)
+      AND t.currency = 'LKR'
+      AND t.amount IS NOT NULL
+      AND LOWER(TRIM(COALESCE(t.txn_type,''))) IN ('sale','amex')
+      AND pk_as.pair_key IS NULL
+      {pos_date}
+    GROUP BY t.store_id
+""".strip()
+
+    activity_where = {
+        "ipg": "ipg.store_id IS NOT NULL",
+        "pos": "pos.store_id IS NOT NULL",
+        "ipg_only": "ipg.store_id IS NOT NULL AND pos.store_id IS NULL",
+        "pos_only": "pos.store_id IS NOT NULL AND ipg.store_id IS NULL",
+        "both": "ipg.store_id IS NOT NULL AND pos.store_id IS NOT NULL",
+        "all": "(ipg.store_id IS NOT NULL OR pos.store_id IS NOT NULL)",
+    }.get(filter_type, "(ipg.store_id IS NOT NULL OR pos.store_id IS NOT NULL)")
+
+    status_where = "s.is_active = 1 AND s.free_trail = 0"
+
+    base_rows = f"""
+SELECT
+    s.store_id,
+    COALESCE(
+        NULLIF(TRIM(s.doing_business_name), ''),
+        NULLIF(TRIM(s.registered_name), ''),
+        pos.pos_merchant_name,
+        CONCAT('Store ', s.store_id)
+    ) AS merchant_name,
+    CASE
+        WHEN ipg.store_id IS NOT NULL AND pos.store_id IS NOT NULL THEN 'IPG and POS'
+        WHEN ipg.store_id IS NOT NULL THEN 'IPG Only'
+        WHEN pos.store_id IS NOT NULL THEN 'POS Only'
+        ELSE 'Neither'
+    END AS merchant_type,
+    COALESCE(ipg.ipg_transaction_count, 0) AS ipg_transaction_count,
+    COALESCE(pos.pos_transaction_count, 0) AS pos_transaction_count
+FROM webxpay_master.tbl_store s
+LEFT JOIN ({ipg_sub}) ipg
+    ON ipg.store_id = s.store_id
+LEFT JOIN ({pos_sub}) pos
+    ON pos.store_id = s.store_id
+WHERE {status_where}
+  AND {activity_where}
+""".strip()
+
+    if want_count:
+        if filter_type in ("ipg", "pos", "both", "ipg_only", "pos_only"):
+            label = {
+                "ipg": "IPG",
+                "pos": "POS",
+                "both": "IPG and POS",
+                "ipg_only": "IPG Only",
+                "pos_only": "POS Only",
+            }[filter_type]
+            return f"""
+SELECT
+    '{label}' AS merchant_group,
+    COUNT(*) AS merchant_count
+FROM ({base_rows}) merchant_rows;
+""".strip()
+
+        return f"""
+SELECT
+    merchant_type,
+    COUNT(*) AS merchant_count
+FROM ({base_rows}) merchant_rows
+GROUP BY merchant_type
+ORDER BY FIELD(merchant_type, 'IPG and POS', 'IPG Only', 'POS Only');
+""".strip()
+
+    return f"""
+{base_rows}
+ORDER BY FIELD(merchant_type, 'IPG and POS', 'IPG Only', 'POS Only'), merchant_name;
+""".strip()
+
+
 # =========================================================
 # GENERIC SQL VIA GPT
 # =========================================================
@@ -2380,11 +2611,17 @@ def generate_sql(question: str, schema: str | None = None) -> str:
             return build_merchant_onboarding_timeseries_sql(question, ds, de, grain)
         return build_merchant_onboarding_sql(question, ds, de)
 
+    # Transaction-active merchant names/counts by POS/IPG channel.
+    # Must run before merchant-type and POS summary routing.
+    if _is_active_transacting_merchant_query(question):
+        return build_active_transacting_merchants_sql(question, ds, de)
+
     # ✅ Merchant type classification (IPG only / POS only / both)
     _mtype_kw = ["ipg only", "pos only", "ipg and pos", "both ipg and pos",
                  "ipg or pos", "which channel", "merchant type", "merchant channel",
-                 "ipg merchant", "pos merchant", "merchant with both", "have both",
-                 "has both", "using both", "both channel", "both channels"]
+                 "ipg merchant", "pos merchant", "merchant with both", "merchants with both",
+                 "have both", "has both", "using both", "both channel", "both channels",
+                 "both pos and ipg", "both ipg and pos"]
     if any(k in ql_gen for k in _mtype_kw) and "transact" not in ql_gen:
         _want_count = any(w in ql_gen for w in ["how many", "count", "total", "number of"])
         # Detect specific filter
@@ -2392,7 +2629,7 @@ def generate_sql(question: str, schema: str | None = None) -> str:
             _ft = "ipg"
         elif "pos only" in ql_gen or ("pos" in ql_gen and "ipg" not in ql_gen and "both" not in ql_gen):
             _ft = "pos"
-        elif "both" in ql_gen or ("ipg and pos" in ql_gen) or ("ipg or pos" in ql_gen):
+        elif "both" in ql_gen or ("ipg and pos" in ql_gen) or ("pos and ipg" in ql_gen) or ("ipg or pos" in ql_gen):
             _ft = "both"
         else:
             _ft = "all"
@@ -2567,6 +2804,32 @@ def build_short_answer(question: str, sql_result):
 
     row = sql_result[0]
     ql = question.lower()
+
+    if isinstance(sql_result, list) and "merchant_name" in row and "store_id" in row:
+        total_rows = len(sql_result)
+        if "merchant_type" in row:
+            counts = {}
+            for r in sql_result:
+                merchant_type = r.get("merchant_type") or "Unclassified"
+                counts[merchant_type] = counts.get(merchant_type, 0) + 1
+            breakdown = ", ".join(f"{k}: {v:,}" for k, v in counts.items())
+            return (
+                f"Found {total_rows:,} active merchants for the selected period. "
+                f"Breakdown: {breakdown}. See the result table for merchant names."
+            )
+
+        channel = "POS" if "pos" in ql else "IPG" if "ipg" in ql else "matching"
+        return f"Found {total_rows:,} active {channel} merchants for the selected period. See the result table for merchant names."
+
+    if isinstance(sql_result, list) and (
+        ("merchant_count" in row and "merchant_type" in row)
+        or ("merchant_count" in row and "merchant_group" in row)
+    ):
+        parts = []
+        for r in sql_result:
+            label = r.get("merchant_type") or r.get("merchant_group") or "Merchants"
+            parts.append(f"{label}: {int(r.get('merchant_count') or 0):,}")
+        return "Active merchant count for the selected period: " + ", ".join(parts) + "."
 
     if "revenue" in ql and ("usd" in ql or "dollar" in ql or "dollars" in ql):
         val = row.get("total_revenue_usd")
@@ -4194,10 +4457,47 @@ def handle_user_question(question: str, sql_executor):
 
     # ── Step 1b-pre-0a: Merchant type queries (IPG only / POS only / both) ──
     ql_huq = question.lower()
+    # Transaction-active merchant names/counts by POS/IPG channel.
+    # Must run before merchant-type and overview routing.
+    if _is_active_transacting_merchant_query(question):
+        _schema_am = load_schema()
+        _sql_am = generate_sql(question, _schema_am)
+        _result_am = sql_executor(_sql_am)
+
+        if isinstance(_result_am, dict) and "error" in _result_am:
+            _answer_am = f"**Database error:** {_result_am.get('error', 'Unknown database error')}"
+            return {
+                "question": question,
+                "sql": _sql_am,
+                "raw_result": _result_am,
+                "answer": _answer_am,
+                "insights": _answer_am,
+                "response_type": "data_query",
+            }
+
+        _answer_am = build_short_answer(question, _result_am)
+        _insights_am = None
+        if _answer_am is None:
+            try:
+                _insights_am = generate_insights(question, _result_am)
+                _answer_am = _insights_am
+            except Exception:
+                _answer_am = "I found matching merchant rows, but could not generate a detailed insight summary."
+
+        return {
+            "question": question,
+            "sql": _sql_am,
+            "raw_result": _result_am,
+            "answer": _answer_am,
+            "insights": _insights_am or _answer_am,
+            "response_type": "data_query",
+        }
+
     _mtype_kw_h = ["ipg only", "pos only", "ipg and pos", "both ipg and pos",
                    "ipg or pos", "which channel", "merchant type", "merchant channel",
-                   "ipg merchant", "pos merchant", "merchant with both", "have both",
-                   "has both", "using both", "both channel", "both channels"]
+                   "ipg merchant", "pos merchant", "merchant with both", "merchants with both",
+                   "have both", "has both", "using both", "both channel", "both channels",
+                   "both pos and ipg", "both ipg and pos"]
     if any(k in ql_huq for k in _mtype_kw_h) and "transact" not in ql_huq:
         _schema_mt = load_schema()
         _sql_mt = generate_sql(question, _schema_mt)

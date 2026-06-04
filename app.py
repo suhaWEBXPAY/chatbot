@@ -1,4 +1,5 @@
 from flask import Flask, request, jsonify, send_from_directory
+from auth import init_auth_db, login_required, register_auth_routes
 from db import run_sql
 from gpt_helpers import handle_user_question, build_overview_table_row
 import json
@@ -14,12 +15,27 @@ except FileNotFoundError:
     SCHEMA = ""
 
 app = Flask(__name__, static_folder='static')
+app.secret_key = (
+    os.getenv("FLASK_SECRET_KEY")
+    or os.getenv("SECRET_KEY")
+    or "change-me-before-deploying"
+)
+app.config.update(
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE="Lax",
+)
+if os.getenv("SESSION_COOKIE_SECURE", "").lower() in {"1", "true", "yes", "on"}:
+    app.config["SESSION_COOKIE_SECURE"] = True
+
+init_auth_db()
+register_auth_routes(app)
 
 
 # -----------------------------
 # CHATBOT ENDPOINT
 # -----------------------------
 @app.route("/ask", methods=["POST"])
+@login_required
 def ask():
     data = request.get_json(silent=True) or {}
     question = (data.get("question") or "").strip()
@@ -186,6 +202,7 @@ def ask():
 FEEDBACK_FILE = os.path.join(os.path.dirname(__file__), "feedback_log.json")
 
 @app.route("/feedback", methods=["POST"])
+@login_required
 def feedback():
     data = request.get_json(silent=True) or {}
     correct   = data.get("correct")        # bool
@@ -225,9 +242,11 @@ def feedback():
 # SERVE FRONTEND
 # -----------------------------
 @app.route("/")
+@login_required
 def index():
     return send_from_directory('static', 'index.html')
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8000, debug=True)
+    port = int(os.getenv("PORT") or os.getenv("FLASK_RUN_PORT") or 5000)
+    app.run(host="0.0.0.0", port=port, debug=True)
