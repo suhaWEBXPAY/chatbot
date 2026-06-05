@@ -70,7 +70,7 @@ def user_count() -> int:
 
 
 def signup_enabled() -> bool:
-    return True
+    return user_count() == 0  # only open for the very first admin account
 
 
 def _row_to_user(row) -> dict | None:

@@ -29,3 +29,30 @@ Connection pool created (size=8)
  * Restarting with stat
  * Debugger is active!
  * Debugger PIN: 118-444-813
+ * Detected change in 'C:\\Users\\suham\\Downloads\\chatbot_project123\\chatbot_project\\auth.py', reloading
+Connection pool created (size=8)
+ * Restarting with stat
+ * Debugger is active!
+ * Debugger PIN: 118-444-813
+127.0.0.1 - - [04/Jun/2026 16:07:37] "GET / HTTP/1.1" 302 -
+127.0.0.1 - - [04/Jun/2026 16:07:37] "GET /login?next=/ HTTP/1.1" 200 -
+127.0.0.1 - - [04/Jun/2026 16:07:37] "GET /static/logo.png HTTP/1.1" 200 -
+127.0.0.1 - - [04/Jun/2026 16:07:38] "GET /auth/status HTTP/1.1" 200 -
+127.0.0.1 - - [04/Jun/2026 16:07:38] "GET /favicon.ico HTTP/1.1" 404 -
+127.0.0.1 - - [04/Jun/2026 16:08:19] "POST /auth/register HTTP/1.1" 200 -
+127.0.0.1 - - [04/Jun/2026 16:08:19] "GET / HTTP/1.1" 200 -
+127.0.0.1 - - [04/Jun/2026 16:08:19] "GET /static/logo.png HTTP/1.1" 304 -
+127.0.0.1 - - [04/Jun/2026 16:08:20] "GET /api/me HTTP/1.1" 200 -
+127.0.0.1 - - [04/Jun/2026 16:08:20] "GET /api/chat-sessions HTTP/1.1" 200 -
+127.0.0.1 - - [04/Jun/2026 16:08:23] "GET /users HTTP/1.1" 200 -
+127.0.0.1 - - [04/Jun/2026 16:08:23] "GET /static/logo.png HTTP/1.1" 304 -
+127.0.0.1 - - [04/Jun/2026 16:08:23] "GET /api/me HTTP/1.1" 200 -
+127.0.0.1 - - [04/Jun/2026 16:08:24] "GET /api/users HTTP/1.1" 200 -
+127.0.0.1 - - [04/Jun/2026 16:13:27] "GET /users HTTP/1.1" 200 -
+127.0.0.1 - - [04/Jun/2026 16:13:27] "GET /static/logo.png HTTP/1.1" 304 -
+127.0.0.1 - - [04/Jun/2026 16:13:27] "GET /api/me HTTP/1.1" 200 -
+127.0.0.1 - - [04/Jun/2026 16:13:27] "GET /api/users HTTP/1.1" 200 -
+127.0.0.1 - - [04/Jun/2026 16:31:28] "GET / HTTP/1.1" 304 -
+127.0.0.1 - - [04/Jun/2026 16:31:28] "GET /static/logo.png HTTP/1.1" 304 -
+127.0.0.1 - - [04/Jun/2026 16:31:28] "GET /api/me HTTP/1.1" 200 -
+127.0.0.1 - - [04/Jun/2026 16:31:28] "GET /api/chat-sessions HTTP/1.1" 200 -

@@ -3,401 +3,659 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Users | WEBXPAY Analytics Assistant</title>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <title>Users | WEBXPAY Analytics</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css">
   <style>
     :root {
-      --accent: #F2FF5C;
-      --dark: #1A1F24;
-      --bg: #f2f4f7;
-      --card: #ffffff;
-      --text: #111827;
-      --muted: #6b7280;
-      --border: #e5e7eb;
-      --danger: #dc2626;
-      --ok: #15803d;
+      --yellow:    #F1FF5C;
+      --black:     #22272D;
+      --ash:       #AAB0B8;
+      --lightblue: #F4FAFF;
+
+      --red:       #FF766B;
+      --red-soft:  #FFAFA8;
+      --green:     #8BFF99;
+      --green-soft:#BDFFC0;
+      --cyan:      #62F0FF;
+      --cyan-soft: #C5FFFF;
+
+      --border:  #E0E8F0;
+      --white:   #FFFFFF;
+      --text:    #22272D;
+      --muted:   #6B7480;
+      --radius:  10px;
+      --shadow:  0 4px 16px rgba(34,39,45,0.08);
     }
 
-    * { box-sizing: border-box; }
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
     body {
-      margin: 0;
-      min-height: 100vh;
       font-family: Inter, -apple-system, BlinkMacSystemFont, sans-serif;
-      background: var(--bg);
+      background: var(--lightblue);
       color: var(--text);
+      min-height: 100vh;
+      font-size: 14px;
     }
 
+    /* ── TOPBAR ── */
     .topbar {
-      height: 64px;
-      background: #fff;
-      border-bottom: 1px solid var(--border);
+      height: 62px;
+      background: var(--black);
       display: flex;
       align-items: center;
       justify-content: space-between;
-      padding: 0 24px;
+      padding: 0 28px;
       position: sticky;
       top: 0;
-      z-index: 2;
+      z-index: 10;
     }
 
     .brand {
       display: flex;
       align-items: center;
       gap: 10px;
-      font-weight: 800;
     }
 
-    .brand img {
-      width: 34px;
+    .brand-logo {
+      width: 36px; height: 36px;
+      border-radius: 9px;
+      background: var(--yellow);
+      display: grid; place-items: center;
+      overflow: hidden;
+      flex-shrink: 0;
+    }
+
+    .brand-logo img { width: 100%; height: 100%; object-fit: cover; }
+
+    .brand-name {
+      font-size: 15px; font-weight: 800;
+      color: #FFFFFF; letter-spacing: -0.2px;
+    }
+
+    .brand-page {
+      font-size: 11px; font-weight: 600;
+      color: var(--ash); letter-spacing: 0.3px;
+    }
+
+    .topbar-actions { display: flex; align-items: center; gap: 8px; }
+
+    .tb-btn {
       height: 34px;
-      object-fit: contain;
-      background: #000;
+      padding: 0 14px;
       border-radius: 8px;
-      padding: 5px;
-    }
-
-    .actions {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-    }
-
-    button, .link-btn {
-      height: 36px;
-      border-radius: 8px;
-      border: 1px solid var(--border);
-      background: #fff;
-      color: var(--text);
+      border: 1px solid rgba(255,255,255,0.12);
+      background: rgba(255,255,255,0.07);
+      color: #FFFFFF;
       font: inherit;
-      font-size: 13px;
-      font-weight: 700;
-      padding: 0 12px;
+      font-size: 12px;
+      font-weight: 600;
       cursor: pointer;
       display: inline-flex;
       align-items: center;
       gap: 7px;
       text-decoration: none;
+      transition: background 0.15s, border-color 0.15s;
     }
 
-    button.primary {
-      background: var(--dark);
-      color: #fff;
-      border-color: var(--dark);
+    .tb-btn:hover { background: rgba(255,255,255,0.13); border-color: rgba(255,255,255,0.2); }
+
+    .tb-btn.accent {
+      background: var(--yellow);
+      color: var(--black);
+      border-color: var(--yellow);
+      font-weight: 700;
     }
 
-    button.danger { color: var(--danger); }
+    .tb-btn.accent:hover { background: #D4E000; border-color: #D4E000; }
 
-    main {
-      width: min(1120px, calc(100% - 32px));
-      margin: 24px auto;
+    /* ── LAYOUT ── */
+    .page {
+      max-width: 1180px;
+      margin: 28px auto;
+      padding: 0 20px;
       display: grid;
       grid-template-columns: 320px 1fr;
-      gap: 18px;
+      gap: 20px;
       align-items: start;
     }
 
-    .panel {
-      background: var(--card);
+    /* ── CARDS ── */
+    .card {
+      background: var(--white);
       border: 1px solid var(--border);
-      border-radius: 8px;
-      box-shadow: 0 10px 22px rgba(15, 23, 42, 0.06);
+      border-radius: 14px;
+      box-shadow: var(--shadow);
+      overflow: hidden;
     }
 
-    .panel-head {
-      padding: 16px 18px;
+    .card-head {
+      padding: 18px 22px 16px;
       border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      gap: 12px;
     }
 
-    h1, h2 {
-      margin: 0;
-      letter-spacing: 0;
-    }
-
-    h1 { font-size: 18px; }
-    h2 { font-size: 15px; }
-
-    .muted {
-      color: var(--muted);
+    .card-head-icon {
+      width: 34px; height: 34px;
+      border-radius: 9px;
+      display: grid; place-items: center;
       font-size: 13px;
-      margin-top: 4px;
+      flex-shrink: 0;
     }
 
-    form {
-      padding: 18px;
-    }
+    .card-head-icon.yellow { background: var(--yellow); color: var(--black); }
+    .card-head-icon.cyan   { background: var(--cyan-soft); color: #0A7A8A; }
+
+    .card-head h2 { font-size: 14px; font-weight: 700; color: var(--text); }
+    .card-head p  { font-size: 11.5px; color: var(--muted); margin-top: 2px; }
+
+    /* ── FORM ── */
+    .form-body { padding: 20px 22px; }
+
+    .form-group { margin-bottom: 14px; }
 
     label {
       display: block;
-      font-size: 12px;
+      font-size: 11.5px;
       font-weight: 700;
-      color: #374151;
-      margin: 0 0 6px;
+      color: var(--text);
+      margin-bottom: 6px;
+      letter-spacing: 0.1px;
+    }
+
+    .input-wrap { position: relative; }
+    .input-wrap i {
+      position: absolute; left: 12px; top: 50%;
+      transform: translateY(-50%);
+      color: var(--ash); font-size: 12px;
+      pointer-events: none;
     }
 
     input, select {
       width: 100%;
-      height: 40px;
-      border: 1px solid var(--border);
+      height: 42px;
+      border: 1.5px solid var(--border);
       border-radius: 8px;
-      padding: 0 11px;
+      padding: 0 12px 0 36px;
       font: inherit;
-      margin-bottom: 12px;
-      background: #fff;
+      font-size: 13px;
+      color: var(--text);
+      background: var(--white);
+      outline: none;
+      transition: border-color 0.15s, box-shadow 0.15s;
+      appearance: none;
     }
+
+    select { padding-left: 36px; cursor: pointer; }
+
+    input::placeholder { color: var(--ash); }
 
     input:focus, select:focus {
-      outline: none;
-      border-color: #a3a900;
-      box-shadow: 0 0 0 3px rgba(242, 255, 92, 0.35);
+      border-color: #C8D600;
+      box-shadow: 0 0 0 3px rgba(241,255,92,0.2);
     }
 
-    .msg {
-      min-height: 20px;
-      padding: 0 18px 16px;
+    .btn-create {
+      width: 100%;
+      height: 44px;
+      border: none;
+      border-radius: 9px;
+      background: var(--yellow);
+      color: var(--black);
+      font: inherit;
       font-size: 13px;
+      font-weight: 800;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      margin-top: 4px;
+      box-shadow: 0 2px 10px rgba(241,255,92,0.3);
+      transition: background 0.15s, transform 0.12s, box-shadow 0.15s;
+    }
+
+    .btn-create:hover { background: #D4E000; transform: translateY(-1px); box-shadow: 0 4px 16px rgba(241,255,92,0.4); }
+    .btn-create:active { transform: scale(0.98); }
+
+    .form-msg {
+      min-height: 18px;
+      font-size: 12px;
+      padding: 10px 22px 14px;
       color: var(--muted);
     }
 
-    .msg.error { color: var(--danger); }
+    .form-msg.error { color: var(--red); }
+    .form-msg.success { color: #1A7A30; }
 
-    .table-wrap {
-      overflow-x: auto;
+    /* ── STATS ROW ── */
+    .stats-row {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 12px;
+      margin-bottom: 20px;
     }
 
-    table {
-      width: 100%;
-      border-collapse: collapse;
-      font-size: 13px;
+    .stat-card {
+      background: var(--white);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 14px 16px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      box-shadow: 0 2px 8px rgba(34,39,45,0.05);
     }
 
-    th, td {
-      padding: 12px 14px;
+    .stat-icon {
+      width: 36px; height: 36px;
+      border-radius: 9px;
+      display: grid; place-items: center;
+      font-size: 14px;
+      flex-shrink: 0;
+    }
+
+    .stat-label { font-size: 10.5px; font-weight: 700; color: var(--ash); text-transform: uppercase; letter-spacing: 0.5px; }
+    .stat-value { font-size: 22px; font-weight: 800; color: var(--text); line-height: 1.2; letter-spacing: -0.5px; }
+
+    /* ── TABLE ── */
+    .table-wrap { overflow-x: auto; }
+
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+
+    thead th {
+      background: var(--black);
+      color: #D0D6DE;
+      padding: 10px 16px;
       text-align: left;
-      border-bottom: 1px solid var(--border);
+      font-size: 10.5px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
       white-space: nowrap;
     }
 
-    th {
-      color: #374151;
-      font-size: 11px;
-      text-transform: uppercase;
-      letter-spacing: .04em;
-      background: #f9fafb;
+    thead th:first-child { border-radius: 0; }
+
+    tbody tr { transition: background 0.12s; }
+    tbody tr:hover { background: #F0F6FF; }
+    tbody tr:nth-child(even) { background: #FAFCFF; }
+    tbody tr:nth-child(even):hover { background: #EEF4FF; }
+
+    td {
+      padding: 11px 16px;
+      border-bottom: 1px solid var(--border);
+      white-space: nowrap;
+      color: var(--text);
     }
 
+    .user-cell { display: flex; align-items: center; gap: 10px; }
+
+    .user-avatar {
+      width: 32px; height: 32px;
+      border-radius: 8px;
+      background: var(--black);
+      color: var(--yellow);
+      display: grid; place-items: center;
+      font-size: 12px; font-weight: 800;
+      flex-shrink: 0;
+    }
+
+    .user-name { font-weight: 700; font-size: 13px; }
+    .user-joined { font-size: 11px; color: var(--ash); margin-top: 1px; }
+
+    /* ── BADGES ── */
     .badge {
       display: inline-flex;
       align-items: center;
+      gap: 5px;
       border-radius: 999px;
-      padding: 3px 9px;
+      padding: 3px 10px;
       font-size: 11px;
-      font-weight: 800;
-      background: #eef2ff;
-      color: #3730a3;
+      font-weight: 700;
     }
 
-    .badge.ok {
-      background: #dcfce7;
-      color: var(--ok);
+    .badge-admin {
+      background: rgba(241,255,92,0.18);
+      color: #6A7800;
+      border: 1px solid rgba(241,255,92,0.4);
     }
 
-    .badge.off {
-      background: #fee2e2;
-      color: var(--danger);
+    .badge-user {
+      background: rgba(98,240,255,0.15);
+      color: #0A7A8A;
+      border: 1px solid rgba(98,240,255,0.35);
     }
 
-    @media (max-width: 820px) {
-      main { grid-template-columns: 1fr; }
-      .topbar { padding: 0 14px; }
-      .brand span { display: none; }
+    .badge-active {
+      background: rgba(139,255,153,0.18);
+      color: #1A7A30;
+      border: 1px solid rgba(139,255,153,0.45);
+    }
+
+    .badge-inactive {
+      background: rgba(255,118,107,0.12);
+      color: #C0392B;
+      border: 1px solid rgba(255,118,107,0.3);
+    }
+
+    /* ── ACTION BUTTONS ── */
+    .act-btn {
+      height: 30px;
+      padding: 0 12px;
+      border-radius: 7px;
+      font: inherit;
+      font-size: 11.5px;
+      font-weight: 700;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      transition: all 0.15s;
+      border: 1.5px solid;
+    }
+
+    .act-btn.deactivate {
+      background: rgba(255,118,107,0.08);
+      color: #C0392B;
+      border-color: rgba(255,118,107,0.3);
+    }
+
+    .act-btn.deactivate:hover {
+      background: rgba(255,118,107,0.18);
+      border-color: rgba(255,118,107,0.5);
+    }
+
+    .act-btn.activate {
+      background: rgba(139,255,153,0.1);
+      color: #1A7A30;
+      border-color: rgba(139,255,153,0.4);
+    }
+
+    .act-btn.activate:hover {
+      background: rgba(139,255,153,0.22);
+      border-color: rgba(139,255,153,0.6);
+    }
+
+    .self-label {
+      font-size: 11px;
+      color: var(--ash);
+      font-style: italic;
+    }
+
+    .empty-row td {
+      text-align: center;
+      padding: 32px;
+      color: var(--ash);
+      font-size: 13px;
+    }
+
+    /* ── RESPONSIVE ── */
+    @media (max-width: 860px) {
+      .page { grid-template-columns: 1fr; }
+      .stats-row { grid-template-columns: 1fr 1fr; }
+      .topbar { padding: 0 16px; }
+      .brand-page { display: none; }
     }
   </style>
 </head>
 <body>
+
+  <!-- TOPBAR -->
   <header class="topbar">
     <div class="brand">
-      <img src="static/logo.png" alt="WEBXPAY">
-      <span>WEBXPAY Analytics Users</span>
+      <div class="brand-logo"><img src="static/logo.png" alt="WEBXPAY"></div>
+      <div>
+        <div class="brand-name">WEBXPAY</div>
+        <div class="brand-page">User Management</div>
+      </div>
     </div>
-    <div class="actions">
-      <a href="/" class="link-btn"><i class="fas fa-message"></i> Chat</a>
-      <button onclick="logout()"><i class="fas fa-right-from-bracket"></i> Log out</button>
+    <div class="topbar-actions">
+      <a href="/" class="tb-btn"><i class="fas fa-message"></i> Chat</a>
+      <button class="tb-btn accent" onclick="logout()"><i class="fas fa-right-from-bracket"></i> Log out</button>
     </div>
   </header>
 
-  <main>
-    <section class="panel">
-      <div class="panel-head">
-        <h2>Create User</h2>
-        <div class="muted">Stored in the local SQLite user database.</div>
+  <div class="page">
+
+    <!-- CREATE USER PANEL -->
+    <div>
+      <div class="card">
+        <div class="card-head">
+          <div class="card-head-icon yellow"><i class="fas fa-user-plus"></i></div>
+          <div>
+            <h2>Create User</h2>
+            <p>Add a new analytics account</p>
+          </div>
+        </div>
+
+        <form id="create-form">
+          <div class="form-body">
+            <div class="form-group">
+              <label>Username</label>
+              <div class="input-wrap">
+                <i class="fas fa-user"></i>
+                <input id="username" autocomplete="off" placeholder="e.g. john_doe" required>
+              </div>
+            </div>
+
+            <div class="form-group">
+              <label>Email <span style="font-weight:400;color:var(--ash)">(optional)</span></label>
+              <div class="input-wrap">
+                <i class="fas fa-envelope"></i>
+                <input id="email" type="email" autocomplete="off" placeholder="user@example.com">
+              </div>
+            </div>
+
+            <div class="form-group">
+              <label>Password</label>
+              <div class="input-wrap">
+                <i class="fas fa-lock"></i>
+                <input id="password" type="password" autocomplete="new-password" placeholder="Min. 8 characters" required>
+              </div>
+            </div>
+
+            <div class="form-group">
+              <label>Role</label>
+              <div class="input-wrap">
+                <i class="fas fa-shield-halved"></i>
+                <select id="role">
+                  <option value="user">User</option>
+                  <option value="admin">Admin</option>
+                </select>
+              </div>
+            </div>
+
+            <button class="btn-create" type="submit">
+              <i class="fas fa-plus"></i> Create Account
+            </button>
+          </div>
+        </form>
+        <div class="form-msg" id="message"></div>
       </div>
-      <form id="create-form">
-        <label for="username">Username</label>
-        <input id="username" autocomplete="off" required>
+    </div>
 
-        <label for="email">Email</label>
-        <input id="email" type="email" autocomplete="off">
-
-        <label for="password">Password</label>
-        <input id="password" type="password" autocomplete="new-password" required>
-
-        <label for="role">Role</label>
-        <select id="role">
-          <option value="user">User</option>
-          <option value="admin">Admin</option>
-        </select>
-
-        <button class="primary" type="submit"><i class="fas fa-plus"></i> Create</button>
-      </form>
-      <div class="msg" id="message"></div>
-    </section>
-
-    <section class="panel">
-      <div class="panel-head">
-        <h1>Users</h1>
-        <div class="muted" id="summary">Loading...</div>
+    <!-- USERS TABLE PANEL -->
+    <div>
+      <div class="stats-row">
+        <div class="stat-card">
+          <div class="stat-icon" style="background:rgba(241,255,92,0.15);color:#6A7800"><i class="fas fa-users"></i></div>
+          <div>
+            <div class="stat-label">Total Users</div>
+            <div class="stat-value" id="stat-total">—</div>
+          </div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-icon" style="background:rgba(139,255,153,0.15);color:#1A7A30"><i class="fas fa-circle-check"></i></div>
+          <div>
+            <div class="stat-label">Active</div>
+            <div class="stat-value" id="stat-active">—</div>
+          </div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-icon" style="background:rgba(98,240,255,0.15);color:#0A7A8A"><i class="fas fa-user-shield"></i></div>
+          <div>
+            <div class="stat-label">Admins</div>
+            <div class="stat-value" id="stat-admins">—</div>
+          </div>
+        </div>
       </div>
-      <div class="table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th>Username</th>
-              <th>Email</th>
-              <th>Role</th>
-              <th>Status</th>
-              <th>Last login</th>
-              <th></th>
-            </tr>
-          </thead>
-          <tbody id="users-body"></tbody>
-        </table>
+
+      <div class="card">
+        <div class="card-head">
+          <div class="card-head-icon cyan"><i class="fas fa-users"></i></div>
+          <div>
+            <h2>All Users</h2>
+            <p id="summary">Loading...</p>
+          </div>
+        </div>
+
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>User</th>
+                <th>Email</th>
+                <th>Role</th>
+                <th>Status</th>
+                <th>Last Login</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody id="users-body"></tbody>
+          </table>
+        </div>
       </div>
-    </section>
-  </main>
+    </div>
 
-  <script>
-    const body = document.getElementById("users-body");
-    const summary = document.getElementById("summary");
-    const msg = document.getElementById("message");
-    let currentUser = null;
+  </div>
 
-    function esc(value) {
-      return String(value ?? "").replace(/[&<>"']/g, c => ({
-        "&": "&amp;",
-        "<": "&lt;",
-        ">": "&gt;",
-        '"': "&quot;",
-        "'": "&#39;"
-      }[c]));
+<script>
+  const usersBody = document.getElementById("users-body");
+  const summary   = document.getElementById("summary");
+  const msg       = document.getElementById("message");
+  let currentUser = null;
+
+  function esc(v) {
+    return String(v ?? "").replace(/[&<>"']/g, c =>
+      ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+  }
+
+  function setMessage(text, type = "") {
+    msg.textContent = text || "";
+    msg.className = "form-msg" + (type ? " " + type : "");
+  }
+
+  function fmtDate(v) {
+    if (!v) return "—";
+    const d = new Date(v);
+    return isNaN(d) ? v : d.toLocaleDateString("en-GB", { day:"2-digit", month:"short", year:"numeric", hour:"2-digit", minute:"2-digit" });
+  }
+
+  function initials(name) {
+    return (name || "?").slice(0, 2).toUpperCase();
+  }
+
+  async function loadMe() {
+    const res = await fetch("/api/me");
+    if (res.status === 401) { window.location.href = "/login?next=/users"; return; }
+    currentUser = (await res.json()).user;
+  }
+
+  async function loadUsers() {
+    const res = await fetch("/api/users");
+    if (res.status === 401) { window.location.href = "/login?next=/users"; return; }
+    if (res.status === 403) { window.location.href = "/"; return; }
+
+    const users = (await res.json()).users || [];
+    const active = users.filter(u => u.is_active).length;
+    const admins = users.filter(u => u.role === "admin").length;
+
+    document.getElementById("stat-total").textContent  = users.length;
+    document.getElementById("stat-active").textContent = active;
+    document.getElementById("stat-admins").textContent = admins;
+    summary.textContent = `${users.length} user${users.length === 1 ? "" : "s"} · ${active} active`;
+
+    if (!users.length) {
+      usersBody.innerHTML = `<tr class="empty-row"><td colspan="6"><i class="fas fa-users" style="opacity:.3;margin-right:8px"></i>No users yet</td></tr>`;
+      return;
     }
 
-    function setMessage(text, isError = false) {
-      msg.textContent = text || "";
-      msg.classList.toggle("error", isError);
-    }
+    usersBody.innerHTML = users.map(u => {
+      const isSelf  = currentUser && currentUser.id === u.id;
+      const roleBadge = u.role === "admin"
+        ? `<span class="badge badge-admin"><i class="fas fa-shield-halved"></i> Admin</span>`
+        : `<span class="badge badge-user"><i class="fas fa-user"></i> User</span>`;
+      const statusBadge = u.is_active
+        ? `<span class="badge badge-active"><i class="fas fa-circle" style="font-size:7px"></i> Active</span>`
+        : `<span class="badge badge-inactive"><i class="fas fa-circle" style="font-size:7px"></i> Inactive</span>`;
+      const action = isSelf
+        ? `<span class="self-label"><i class="fas fa-circle-user"></i> You</span>`
+        : u.is_active
+          ? `<button class="act-btn deactivate" onclick="setActive(${u.id},false)"><i class="fas fa-ban"></i> Deactivate</button>`
+          : `<button class="act-btn activate"   onclick="setActive(${u.id},true)"><i class="fas fa-check"></i> Activate</button>`;
 
-    function fmtDate(value) {
-      if (!value) return "-";
-      const d = new Date(value);
-      return Number.isNaN(d.getTime()) ? value : d.toLocaleString();
-    }
+      return `
+        <tr>
+          <td>
+            <div class="user-cell">
+              <div class="user-avatar">${esc(initials(u.username))}</div>
+              <div>
+                <div class="user-name">${esc(u.username)}</div>
+                <div class="user-joined">Joined ${fmtDate(u.created_at).split(",")[0]}</div>
+              </div>
+            </div>
+          </td>
+          <td style="color:var(--muted)">${esc(u.email || "—")}</td>
+          <td>${roleBadge}</td>
+          <td>${statusBadge}</td>
+          <td style="color:var(--muted);font-size:12px">${esc(fmtDate(u.last_login_at))}</td>
+          <td>${action}</td>
+        </tr>`;
+    }).join("");
+  }
 
-    async function loadMe() {
-      const res = await fetch("/api/me");
-      if (res.status === 401) {
-        window.location.href = "/login?next=/users";
-        return;
-      }
-      const data = await res.json();
-      currentUser = data.user;
-    }
-
-    async function loadUsers() {
-      const res = await fetch("/api/users");
-      if (res.status === 401) {
-        window.location.href = "/login?next=/users";
-        return;
-      }
-      if (res.status === 403) {
-        window.location.href = "/";
-        return;
-      }
-      const data = await res.json();
-      const users = data.users || [];
-      summary.textContent = `${users.length.toLocaleString()} user${users.length === 1 ? "" : "s"}`;
-      body.innerHTML = users.map(user => {
-        const isSelf = currentUser && currentUser.id === user.id;
-        const status = user.is_active
-          ? '<span class="badge ok">Active</span>'
-          : '<span class="badge off">Inactive</span>';
-        const action = isSelf
-          ? '<span class="muted">Current user</span>'
-          : `<button class="${user.is_active ? "danger" : ""}" onclick="setActive(${user.id}, ${user.is_active ? "false" : "true"})">${user.is_active ? "Deactivate" : "Activate"}</button>`;
-        return `
-          <tr>
-            <td><strong>${esc(user.username)}</strong></td>
-            <td>${esc(user.email || "-")}</td>
-            <td><span class="badge">${esc(user.role)}</span></td>
-            <td>${status}</td>
-            <td>${esc(fmtDate(user.last_login_at))}</td>
-            <td>${action}</td>
-          </tr>
-        `;
-      }).join("");
-    }
-
-    async function setActive(id, isActive) {
-      setMessage("");
-      const res = await fetch(`/api/users/${id}/status`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ is_active: isActive }),
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        setMessage(data.error || "Update failed.", true);
-        return;
-      }
-      await loadUsers();
-    }
-
-    document.getElementById("create-form").addEventListener("submit", async event => {
-      event.preventDefault();
-      setMessage("");
-      const payload = {
-        username: document.getElementById("username").value.trim(),
-        email: document.getElementById("email").value.trim(),
-        password: document.getElementById("password").value,
-        role: document.getElementById("role").value,
-      };
-      const res = await fetch("/api/users", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        setMessage(data.error || "Create failed.", true);
-        return;
-      }
-      event.target.reset();
-      setMessage("User created.");
-      await loadUsers();
+  async function setActive(id, isActive) {
+    setMessage("");
+    const res = await fetch(`/api/users/${id}/status`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ is_active: isActive }),
     });
+    const data = await res.json();
+    if (!res.ok) { setMessage(data.error || "Update failed.", "error"); return; }
+    await loadUsers();
+  }
 
-    async function logout() {
-      try {
-        await fetch("/logout", { method: "POST" });
-      } catch (_) {}
-      window.location.href = "/login";
-    }
+  document.getElementById("create-form").addEventListener("submit", async e => {
+    e.preventDefault();
+    setMessage("");
+    const payload = {
+      username: document.getElementById("username").value.trim(),
+      email:    document.getElementById("email").value.trim(),
+      password: document.getElementById("password").value,
+      role:     document.getElementById("role").value,
+    };
+    const res = await fetch("/api/users", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    if (!res.ok) { setMessage(data.error || "Create failed.", "error"); return; }
+    e.target.reset();
+    setMessage("User created successfully.", "success");
+    await loadUsers();
+  });
 
-    (async function init() {
-      await loadMe();
-      if (currentUser) await loadUsers();
-    })();
-  </script>
+  async function logout() {
+    try { await fetch("/logout", { method: "POST" }); } catch (_) {}
+    window.location.href = "/login";
+  }
+
+  (async () => { await loadMe(); if (currentUser) await loadUsers(); })();
+</script>
 </body>
 </html>

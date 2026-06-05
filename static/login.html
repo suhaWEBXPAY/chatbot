@@ -298,39 +298,6 @@
       cursor: not-allowed;
     }
 
-    .divider {
-      display: flex;
-      align-items: center;
-      gap: 12px;
-      margin: 22px 0;
-      font-size: 12px;
-      color: var(--ash);
-      font-weight: 500;
-    }
-
-    .divider::before, .divider::after {
-      content: '';
-      flex: 1;
-      height: 1px;
-      background: var(--border);
-    }
-
-    .btn-switch {
-      width: 100%;
-      height: 46px;
-      border: 1.5px solid var(--border);
-      border-radius: 10px;
-      background: var(--white);
-      color: var(--black);
-      font: inherit;
-      font-size: 13px;
-      font-weight: 700;
-      cursor: pointer;
-      transition: border-color 0.15s, background 0.15s;
-    }
-
-    .btn-switch:hover { border-color: var(--ash); background: #f9fbff; }
-
     .msg {
       margin-top: 16px;
       font-size: 13px;
@@ -430,11 +397,6 @@
         </button>
       </form>
 
-      <div id="switch-wrap" class="hidden">
-        <div class="divider">or</div>
-        <button class="btn-switch hidden" id="switch-btn" type="button"></button>
-      </div>
-
       <div class="msg" id="message"></div>
     </div>
   </div>
@@ -442,40 +404,20 @@
 </div>
 
 <script>
-  let mode = "login";
   let setupRequired = false;
-  let signupEnabled = false;
 
-  const form        = document.getElementById("auth-form");
-  const title       = document.getElementById("title");
-  const note        = document.getElementById("note");
-  const message     = document.getElementById("message");
-  const switchBtn   = document.getElementById("switch-btn");
-  const switchWrap  = document.getElementById("switch-wrap");
-  const submitBtn   = document.getElementById("submit-btn");
-  const btnLabel    = document.getElementById("btn-label");
-  const emailGroup  = document.getElementById("email-group");
-  const password    = document.getElementById("password");
+  const form      = document.getElementById("auth-form");
+  const title     = document.getElementById("title");
+  const note      = document.getElementById("note");
+  const message   = document.getElementById("message");
+  const submitBtn = document.getElementById("submit-btn");
+  const btnLabel  = document.getElementById("btn-label");
+  const emailGroup = document.getElementById("email-group");
+  const password  = document.getElementById("password");
 
   function setMessage(text, type = "") {
     message.textContent = text || "";
     message.className = "msg" + (type ? " " + type : "");
-  }
-
-  function setMode(nextMode) {
-    mode = nextMode;
-    const reg = mode === "register";
-    title.textContent = reg ? (setupRequired ? "Create admin account" : "Create account") : "Welcome back";
-    note.textContent  = reg ? (setupRequired ? "The first user will be the admin." : "Create a WEBXPAY analytics account.") : "Sign in to your analytics account.";
-    emailGroup.classList.toggle("hidden", !reg);
-    password.autocomplete = reg ? "new-password" : "current-password";
-    btnLabel.textContent  = reg ? "Create account" : "Sign in";
-    submitBtn.querySelector("i").className = reg ? "fas fa-user-plus" : "fas fa-arrow-right-to-bracket";
-
-    const canSwitch = !setupRequired && signupEnabled;
-    switchWrap.classList.toggle("hidden", !canSwitch);
-    switchBtn.classList.toggle("hidden", !canSwitch);
-    switchBtn.textContent = reg ? "Already have an account? Sign in" : "Create a new account";
   }
 
   async function loadStatus() {
@@ -483,17 +425,16 @@
       const res  = await fetch("/auth/status");
       const data = await res.json();
       setupRequired = !!data.setup_required;
-      signupEnabled = !!data.signup_enabled;
-      setMode(setupRequired ? "register" : "login");
-    } catch (_) {
-      setMode("login");
-    }
+      if (setupRequired) {
+        title.textContent = "Create admin account";
+        note.textContent  = "Set up the first admin account.";
+        emailGroup.classList.remove("hidden");
+        password.autocomplete = "new-password";
+        btnLabel.textContent  = "Create account";
+        submitBtn.querySelector("i").className = "fas fa-user-plus";
+      }
+    } catch (_) {}
   }
-
-  switchBtn.addEventListener("click", () => {
-    setMessage("");
-    setMode(mode === "login" ? "register" : "login");
-  });
 
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
@@ -504,10 +445,10 @@
       username: document.getElementById("username").value.trim(),
       password: document.getElementById("password").value,
     };
-    if (mode === "register") body.email = document.getElementById("email").value.trim();
+    if (setupRequired) body.email = document.getElementById("email").value.trim();
 
     try {
-      const endpoint = mode === "register" ? "/auth/register" : "/auth/login";
+      const endpoint = setupRequired ? "/auth/register" : "/auth/login";
       const res  = await fetch(endpoint, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -515,13 +456,6 @@
       });
       const data = await res.json();
       if (!res.ok) { setMessage(data.error || "Request failed.", "error"); return; }
-
-      if (mode === "register" && !setupRequired) {
-        setMode("login");
-        setMessage("Account created. Sign in to continue.", "success");
-        form.reset();
-        return;
-      }
 
       const params = new URLSearchParams(window.location.search);
       window.location.href = params.get("next") || "/";
