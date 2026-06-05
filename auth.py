@@ -15,7 +15,7 @@ AUTH_DB_PATH = os.getenv(
 
 
 def _utc_now() -> str:
-    return datetime.utcnow().isoformat(timespec="seconds")
+    return datetime.utcnow().isoformat(timespec="seconds") + "Z"
 
 
 def _connect():
