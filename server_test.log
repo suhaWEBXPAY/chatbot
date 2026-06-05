@@ -84,3 +84,8 @@ Connection pool created (size=8)
 127.0.0.1 - - [05/Jun/2026 10:42:49] "POST /api/chat-sessions/1780634762655 HTTP/1.1" 200 -
 127.0.0.1 - - [05/Jun/2026 10:43:29] "POST /ask HTTP/1.1" 200 -
 127.0.0.1 - - [05/Jun/2026 10:43:29] "PUT /api/chat-sessions/1780636366127 HTTP/1.1" 200 -
+127.0.0.1 - - [05/Jun/2026 11:24:13] "GET / HTTP/1.1" 302 -
+127.0.0.1 - - [05/Jun/2026 11:24:14] "GET /login?next=/ HTTP/1.1" 200 -
+127.0.0.1 - - [05/Jun/2026 11:24:14] "GET /static/logo.png HTTP/1.1" 200 -
+127.0.0.1 - - [05/Jun/2026 11:24:14] "GET /auth/status HTTP/1.1" 200 -
+127.0.0.1 - - [05/Jun/2026 11:24:14] "GET /favicon.ico HTTP/1.1" 404 -
