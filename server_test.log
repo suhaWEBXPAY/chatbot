@@ -105,3 +105,102 @@ Connection pool created (size=8)
 127.0.0.1 - - [05/Jun/2026 11:32:00] "GET /static/logo.png HTTP/1.1" 200 -
 127.0.0.1 - - [05/Jun/2026 11:32:00] "GET /api/chat-sessions HTTP/1.1" 200 -
 127.0.0.1 - - [05/Jun/2026 11:32:00] "GET /static/logo.png HTTP/1.1" 304 -
+127.0.0.1 - - [05/Jun/2026 11:36:28] "GET /users HTTP/1.1" 200 -
+127.0.0.1 - - [05/Jun/2026 11:36:28] "GET /static/logo.png HTTP/1.1" 304 -
+127.0.0.1 - - [05/Jun/2026 11:36:28] "POST /api/chat-sessions/1780634762655 HTTP/1.1" 200 -
+127.0.0.1 - - [05/Jun/2026 11:36:28] "GET /api/me HTTP/1.1" 200 -
+127.0.0.1 - - [05/Jun/2026 11:36:28] "POST /api/chat-sessions/1780636366127 HTTP/1.1" 200 -
+127.0.0.1 - - [05/Jun/2026 11:36:28] "GET /api/users HTTP/1.1" 200 -
+ * Detected change in 'C:\\Users\\suham\\Downloads\\chatbot_project123\\chatbot_project\\auth.py', reloading
+Connection pool created (size=8)
+
+[run_sql] Executing SQL (first 500 chars):
+ [run_sql] SQL ERROR: 'charmap' codec can't encode character '\u2192' in position 398: character maps to <undefined>
+
+[run_sql] Executing SQL (first 500 chars):
+ SELECT 
+    t.merchant_name,
+    t.store_id,
+    SUM(t.amount) AS total_amount_lkr
+FROM tbl_pos_transactions t
+LEFT JOIN (
+    SELECT 
+        CONCAT(
+            COALESCE(TRIM(CAST(invoice_no AS CHAR)),''), '|',
+            COALESCE(TRIM(CAST(auth_code AS CHAR)),''), '|',
+            COALESCE(TRIM(rrn),''), '|',
+            COALESCE(TRIM(CAST(terminal_id AS CHAR)),''), '|',
+            COALESCE(TRIM(CAST(terminal_sn AS CHAR)),'')
+        ) AS pair_key
+    FROM tbl_pos_transactions
+    WHERE tra 
+
+
+[run_sql] Executing SQL (first 500 chars):
+ WITH valid_pos AS (
+    SELECT
+        t.store_id
+    FROM webxpay_master.tbl_pos_transactions t
+    WHERE t.ipg_provider_id IN (5, 6)
+      AND t.currency = 'LKR'
+      AND t.transaction_date >= '2026-01-01' AND t.transaction_date < '2026-06-06'
+    GROUP BY
+        t.store_id,
+        t.invoice_no,
+        t.auth_code,
+        t.rrn,
+        t.terminal_id,
+        t.terminal_sn,
+        DATE(t.transaction_date)
+    HAVING COUNT(*) = 1
+       AND MAX(LOWER(TRIM(COALESCE(t.txn_type, '')))) NOT I 
+
+ * Restarting with stat
+ * Debugger is active!
+ * Debugger PIN: 118-444-813
+127.0.0.1 - - [05/Jun/2026 11:52:25] "POST /logout HTTP/1.1" 200 -
+127.0.0.1 - - [05/Jun/2026 11:52:25] "GET /login HTTP/1.1" 200 -
+127.0.0.1 - - [05/Jun/2026 11:52:25] "GET /static/logo.png HTTP/1.1" 304 -
+127.0.0.1 - - [05/Jun/2026 11:52:25] "GET /auth/status HTTP/1.1" 200 -
+127.0.0.1 - - [05/Jun/2026 11:52:42] "POST /auth/login HTTP/1.1" 200 -
+127.0.0.1 - - [05/Jun/2026 11:52:42] "GET / HTTP/1.1" 304 -
+127.0.0.1 - - [05/Jun/2026 11:52:42] "GET /static/logo.png HTTP/1.1" 304 -
+127.0.0.1 - - [05/Jun/2026 11:52:42] "GET /api/me HTTP/1.1" 200 -
+127.0.0.1 - - [05/Jun/2026 11:52:42] "GET /api/chat-sessions HTTP/1.1" 200 -
+127.0.0.1 - - [05/Jun/2026 11:52:43] "GET /users HTTP/1.1" 304 -
+127.0.0.1 - - [05/Jun/2026 11:52:43] "GET /static/logo.png HTTP/1.1" 304 -
+127.0.0.1 - - [05/Jun/2026 11:52:43] "GET /api/me HTTP/1.1" 200 -
+127.0.0.1 - - [05/Jun/2026 11:52:43] "POST /api/chat-sessions/1780636366127 HTTP/1.1" 200 -
+127.0.0.1 - - [05/Jun/2026 11:52:43] "POST /api/chat-sessions/1780634762655 HTTP/1.1" 200 -
+127.0.0.1 - - [05/Jun/2026 11:52:43] "GET /api/users HTTP/1.1" 200 -
+127.0.0.1 - - [05/Jun/2026 21:05:15] "GET /users HTTP/1.1" 304 -
+127.0.0.1 - - [05/Jun/2026 21:05:15] "GET /static/logo.png HTTP/1.1" 304 -
+127.0.0.1 - - [05/Jun/2026 21:05:15] "GET /api/me HTTP/1.1" 200 -
+127.0.0.1 - - [05/Jun/2026 21:05:15] "GET /api/users HTTP/1.1" 200 -
+127.0.0.1 - - [05/Jun/2026 21:05:15] "GET /static/logo.png HTTP/1.1" 304 -
+127.0.0.1 - - [06/Jun/2026 17:57:27] "POST /auth/login HTTP/1.1" 401 -
+127.0.0.1 - - [06/Jun/2026 17:57:30] "POST /auth/login HTTP/1.1" 401 -
+127.0.0.1 - - [06/Jun/2026 17:57:32] "POST /auth/login HTTP/1.1" 401 -
+127.0.0.1 - - [06/Jun/2026 18:01:03] "POST /auth/login HTTP/1.1" 401 -
+127.0.0.1 - - [06/Jun/2026 18:01:44] "POST /auth/login HTTP/1.1" 200 -
+127.0.0.1 - - [06/Jun/2026 18:01:45] "GET / HTTP/1.1" 200 -
+127.0.0.1 - - [06/Jun/2026 18:01:45] "GET /static/logo.png HTTP/1.1" 304 -
+127.0.0.1 - - [06/Jun/2026 18:01:46] "GET /api/me HTTP/1.1" 200 -
+127.0.0.1 - - [06/Jun/2026 18:01:46] "GET /static/logo.png HTTP/1.1" 304 -
+127.0.0.1 - - [06/Jun/2026 18:01:46] "GET /api/chat-sessions HTTP/1.1" 200 -
+127.0.0.1 - - [06/Jun/2026 18:01:46] "GET /static/logo.png HTTP/1.1" 304 -
+127.0.0.1 - - [06/Jun/2026 18:01:54] "PUT /api/chat-sessions/1780749114044 HTTP/1.1" 200 -
+127.0.0.1 - - [06/Jun/2026 18:02:20] "POST /ask HTTP/1.1" 200 -
+127.0.0.1 - - [06/Jun/2026 18:02:21] "PUT /api/chat-sessions/1780749114044 HTTP/1.1" 200 -
+127.0.0.1 - - [06/Jun/2026 18:04:22] "PUT /api/chat-sessions/1780634762655 HTTP/1.1" 200 -
+127.0.0.1 - - [06/Jun/2026 18:04:22] "PUT /api/chat-sessions/1780636366127 HTTP/1.1" 200 -
+127.0.0.1 - - [06/Jun/2026 18:04:22] "PUT /api/chat-sessions/1780749114044 HTTP/1.1" 200 -
+127.0.0.1 - - [06/Jun/2026 18:04:22] "POST /logout HTTP/1.1" 200 -
+127.0.0.1 - - [06/Jun/2026 18:04:22] "GET /login HTTP/1.1" 200 -
+127.0.0.1 - - [06/Jun/2026 18:04:22] "GET /static/logo.png HTTP/1.1" 304 -
+127.0.0.1 - - [06/Jun/2026 18:04:22] "GET /auth/status HTTP/1.1" 200 -
+127.0.0.1 - - [06/Jun/2026 18:05:07] "GET /.well-known/appspecific/com.chrome.devtools.json HTTP/1.1" 404 -
+127.0.0.1 - - [08/Jun/2026 08:58:03] "POST /logout HTTP/1.1" 200 -
+127.0.0.1 - - [08/Jun/2026 08:58:03] "GET /login HTTP/1.1" 200 -
+127.0.0.1 - - [08/Jun/2026 08:58:04] "GET /static/logo.png HTTP/1.1" 304 -
+127.0.0.1 - - [08/Jun/2026 08:58:04] "GET /auth/status HTTP/1.1" 200 -

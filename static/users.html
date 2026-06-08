@@ -400,6 +400,16 @@
       .topbar { padding: 0 16px; }
       .brand-page { display: none; }
     }
+
+    @media (max-width: 600px) {
+      .stats-row { grid-template-columns: 1fr; }
+      .topbar { padding: 0 12px; }
+      .tb-btn { padding: 0 10px; font-size: 11px; gap: 5px; }
+      .page { margin: 16px auto; padding: 0 12px; gap: 14px; }
+      thead th, td { padding: 8px 10px; }
+      .card-head { padding: 14px 16px 12px; }
+      .form-body { padding: 16px; }
+    }
   </style>
 </head>
 <body>
@@ -485,21 +495,21 @@
           <div class="stat-icon" style="background:rgba(241,255,92,0.15);color:#6A7800"><i class="fas fa-users"></i></div>
           <div>
             <div class="stat-label">Total Users</div>
-            <div class="stat-value" id="stat-total">—</div>
+            <div class="stat-value" id="stat-total">-</div>
           </div>
         </div>
         <div class="stat-card">
           <div class="stat-icon" style="background:rgba(139,255,153,0.15);color:#1A7A30"><i class="fas fa-circle-check"></i></div>
           <div>
             <div class="stat-label">Active</div>
-            <div class="stat-value" id="stat-active">—</div>
+            <div class="stat-value" id="stat-active">-</div>
           </div>
         </div>
         <div class="stat-card">
           <div class="stat-icon" style="background:rgba(98,240,255,0.15);color:#0A7A8A"><i class="fas fa-user-shield"></i></div>
           <div>
             <div class="stat-label">Admins</div>
-            <div class="stat-value" id="stat-admins">—</div>
+            <div class="stat-value" id="stat-admins">-</div>
           </div>
         </div>
       </div>
@@ -550,7 +560,7 @@
   }
 
   function fmtDate(v) {
-    if (!v) return "—";
+    if (!v) return "-";
     const d = new Date(v);
     return isNaN(d) ? v : d.toLocaleDateString("en-GB", { day:"2-digit", month:"short", year:"numeric", hour:"2-digit", minute:"2-digit" });
   }
@@ -609,7 +619,7 @@
               </div>
             </div>
           </td>
-          <td style="color:var(--muted)">${esc(u.email || "—")}</td>
+          <td style="color:var(--muted)">${esc(u.email || "-")}</td>
           <td>${roleBadge}</td>
           <td>${statusBadge}</td>
           <td style="color:var(--muted);font-size:12px">${esc(fmtDate(u.last_login_at))}</td>
