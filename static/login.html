@@ -323,13 +323,15 @@
       .page { grid-template-columns: 1fr; }
       .left { display: none; }
       .right { padding: 40px 24px; }
+      /* iOS auto-zoom fix */
+      input { font-size: 16px; }
     }
 
     @media (max-width: 480px) {
       .right { padding: 24px 16px; }
       .card { padding: 28px 22px; border-radius: 14px; }
       .card-head h2 { font-size: 22px; }
-      input { height: 44px; font-size: 13px; }
+      input { height: 44px; font-size: 16px; }
       .btn-primary { height: 46px; }
     }
   </style>

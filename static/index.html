@@ -90,7 +90,7 @@
     }
 
     /* ═══ LAYOUT ═══ */
-    .app { display: flex; height: 100vh; width: 100vw; }
+    .app { display: flex; height: 100vh; height: 100dvh; width: 100vw; }
 
     /* ═══ SIDEBAR ═══ */
     .sidebar {
@@ -946,6 +946,8 @@
     }
 
     /* ═══ RESPONSIVE ═══ */
+    body.sidebar-open { overflow: hidden; }
+
     .sidebar-overlay {
       display: none; position: fixed; inset: 0;
       background: rgba(0,0,0,0.5); z-index: 99;
@@ -963,6 +965,10 @@
       transition: all var(--transition);
     }
     .btn-menu:hover { background: var(--bg-page); }
+
+    /* Prevent tables and SQL blocks from bursting out of chat bubbles */
+    .bubble { overflow-x: hidden; }
+    .bubble .table-wrap, .bubble .sql-block { max-width: 100%; }
 
     @media (max-width: 768px) {
       .sidebar {
@@ -986,6 +992,13 @@
       .welcome h2 { font-size: 20px; }
       .welcome p { font-size: 13px; }
       .kpi-grid { grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); }
+      /* iOS auto-zoom fix — inputs must be ≥16px */
+      textarea#q { font-size: 16px; }
+      /* Larger touch targets */
+      .send-btn { min-height: 44px; min-width: 44px; }
+      .btn-icon, .btn-menu { width: 40px; height: 40px; }
+      /* Toast above the input bar on mobile */
+      .toast { bottom: 76px; right: 16px; left: 16px; justify-content: center; }
     }
 
     @media (max-width: 480px) {
@@ -994,6 +1007,11 @@
       .msg-row { gap: 8px; }
       .chat-area { padding: 12px 8px; }
       .input-area { padding: 6px 8px 10px; }
+      /* Analysis card: wrap pill out on tiny screens */
+      .analysis-head { flex-wrap: wrap; gap: 6px; }
+      .analysis-pill { display: none; }
+      .kpi-value { font-size: 18px; }
+      .welcome h2 { font-size: 18px; }
     }
   </style>
 </head>
@@ -1098,10 +1116,12 @@
 function openSidebar() {
   document.querySelector(".sidebar").classList.add("open");
   document.getElementById("sidebar-overlay").classList.add("show");
+  document.body.classList.add("sidebar-open");
 }
 function closeSidebar() {
   document.querySelector(".sidebar").classList.remove("open");
   document.getElementById("sidebar-overlay").classList.remove("show");
+  document.body.classList.remove("sidebar-open");
 }
 
 // ═══════════════════════════════════════════════════════

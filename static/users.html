@@ -399,16 +399,27 @@
       .stats-row { grid-template-columns: 1fr 1fr; }
       .topbar { padding: 0 16px; }
       .brand-page { display: none; }
+      /* iOS auto-zoom fix */
+      input, select { font-size: 16px; }
     }
 
     @media (max-width: 600px) {
-      .stats-row { grid-template-columns: 1fr; }
+      .stats-row { grid-template-columns: 1fr 1fr; }
       .topbar { padding: 0 12px; }
       .tb-btn { padding: 0 10px; font-size: 11px; gap: 5px; }
       .page { margin: 16px auto; padding: 0 12px; gap: 14px; }
       thead th, td { padding: 8px 10px; }
       .card-head { padding: 14px 16px 12px; }
       .form-body { padding: 16px; }
+      /* Touch targets */
+      .act-btn { min-height: 36px; padding: 0 10px; }
+      .tb-btn { min-height: 36px; }
+    }
+
+    @media (max-width: 400px) {
+      .stats-row { grid-template-columns: 1fr; }
+      /* Hide text labels in topbar, keep icons */
+      .tb-btn span { display: none; }
     }
   </style>
 </head>
