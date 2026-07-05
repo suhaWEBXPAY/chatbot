@@ -5788,7 +5788,11 @@ def handle_user_question(question: str, sql_executor, history=None):
     _ql_ch = question.lower()
     if (re.search(r"(?i)\bipg\b.{0,40}\bpos\b|\bpos\b.{0,40}\bipg\b", question)
             and any(w in _ql_ch for w in ("compare", "compared", "comparison", " vs ",
-                                          "versus", "performance"))
+                                          "versus", "performance",
+                                          # both channels + a metric ("yesterday's IPG and
+                                          # POS GMV and revenue") is the same shape — the
+                                          # legacy path answers it POS-only.
+                                          "gmv", "revenue"))
             and "merchant" not in _ql_ch):
         try:
             from agent_engine import answer_with_agent as _awa_ch

@@ -186,6 +186,16 @@ POS (physical card machine) transactions:
   "Active machines" = terminals with >= 1 transaction in a recent window; default to the last
   90 days AND also report the last-30-day figure, and state the window in the answer.
 - tbl_pos_store_bank_mid maps store_id <-> bank_merchant_mid and holds mdr_rate / cost_rate.
+- POS REVENUE (the validated formula — matches Power BI): per sale/amex row,
+    t.amount * (COALESCE(t.mdr_rate,0) - COALESCE(m.cost_rate,1.7)) / 100
+  with the deduped cost join:
+    LEFT JOIN (SELECT store_id, bank_merchant_mid, MAX(cost_rate) AS cost_rate
+               FROM tbl_pos_store_bank_mid WHERE cost_rate IS NOT NULL
+               GROUP BY store_id, bank_merchant_mid) m
+      ON m.store_id = t.store_id AND m.bank_merchant_mid = t.bank_merchant_mid
+  (NO is_active filter on the MID table). Exclude void rows (txn_type LIKE 'void%');
+  the canonical pipeline also pair-eliminates voided sales — state that small caveat
+  if you skip pair elimination. Single-day POS revenue via this is cheap on live MySQL.
 
 Merchants / stores:
 - tbl_store s ; display name = s.doing_business_name (fallback s.registered_name).
@@ -228,14 +238,33 @@ Payment gateways (IPG "gateway-wise" analysis — use EXACTLY this chain):
 - SANITY: gateway-wise transaction counts must add up to roughly ALL approved transactions
   for the period. If a large share comes back "unattributed", your join is wrong — fix it
   before answering.
-- IPG PROFIT/revenue per approved order (the validated formula — convenience fees are NOT
-  the profit metric; revenue comes from the MDR rate spread):
-    base_lkr * (o.payment_gateway_rate
-                - CASE WHEN o.order_type_id = 3
-                       THEN CAST(o.bank_payment_gateway_rate AS DECIMAL(10,4)) + COALESCE(opg.parent_gateway_rate,0)
-                       ELSE CAST(o.bank_payment_gateway_rate AS DECIMAL(10,4)) END) / 100
-  with LEFT JOIN tbl_order_parent_gateway opg ON opg.order_id = o.order_id.
-  Group this by the gateway chain above for gateway-wise profitability.
+- IPG PROFIT/revenue (the validated formula — convenience fees are NOT the profit
+  metric; revenue comes from the MDR rate spread). COPY THIS TEMPLATE EXACTLY — do NOT
+  simplify the FX conversion or the rate CASE (a simplified version once under-reported
+  revenue by 44%):
+    SELECT ROUND(SUM(
+      (CASE
+         WHEN o.processing_currency_id = '5' THEN o.total_amount
+         WHEN o.exchange_rate IS NOT NULL AND o.exchange_rate NOT LIKE ''
+              AND o.exchange_rate REGEXP '^[0-9]+(\\.[0-9]+)?$'
+           THEN o.total_amount * o.exchange_rate
+         ELSE o.total_amount * (SELECT er.buying_rate FROM tbl_exchange_rate er
+                                WHERE er.currency_id = o.processing_currency_id
+                                  AND er.date <= DATE(p.date_time_transaction)
+                                ORDER BY er.date DESC LIMIT 1)
+       END)
+      * (o.payment_gateway_rate
+         - CASE WHEN o.order_type_id = 3
+                THEN CAST(o.bank_payment_gateway_rate AS DECIMAL(10,4)) + COALESCE(opg.parent_gateway_rate,0)
+                ELSE CAST(o.bank_payment_gateway_rate AS DECIMAL(10,4)) END) / 100
+    ), 2) AS ipg_revenue_lkr
+    FROM tbl_order o
+    JOIN tbl_payment p ON p.payment_id = o.payment_id
+    LEFT JOIN tbl_order_parent_gateway opg ON opg.order_id = o.order_id
+    WHERE o.payment_status_id = 2
+      AND p.date_time_transaction >= '<start>' AND p.date_time_transaction < '<end>'
+  Group by the gateway chain above for gateway-wise profitability. Keep the date window
+  small (a day/week/month) — this is a live-table scan.
 
 Judgment / quality questions ("good merchants", "performing well"):
 - pick measurable criteria (e.g. total approved GMV since onboarding, transacting recently,
