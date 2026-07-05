@@ -2649,7 +2649,14 @@ def generate_sql(question: str, schema: str | None = None) -> str:
                  "ipg merchant", "pos merchant", "merchant with both", "merchants with both",
                  "have both", "has both", "using both", "both channel", "both channels",
                  "both pos and ipg", "both ipg and pos"]
-    if any(k in ql_gen for k in _mtype_kw) and "transact" not in ql_gen:
+    # GUARD (same as the outer handler): a METRIC question that merely mentions a
+    # channel + merchants ("ipg merchants gmv for 04/07/2026") must NOT return the
+    # channel-setup list — it needs actual figures.
+    _mtype_metric_kw = ("performance", "compare", "compared", "comparison", " vs ",
+                        "versus", "gmv", "revenue", "volume", "sales", "value",
+                        "summary", "summarize", "summarise", "top ", "best", "trend")
+    if (any(k in ql_gen for k in _mtype_kw) and "transact" not in ql_gen
+            and not any(w in ql_gen for w in _mtype_metric_kw)):
         _want_count = any(w in ql_gen for w in ["how many", "count", "total", "number of"])
         # Detect specific filter
         if "ipg only" in ql_gen or ("ipg" in ql_gen and "pos" not in ql_gen and "both" not in ql_gen):
@@ -5790,6 +5797,24 @@ def handle_user_question(question: str, sql_executor, history=None):
                 return _ch_out
         except Exception as _ch_e:
             print(f"[handle_user_question] channel-comparison agent unavailable: {_ch_e}")
+
+    # ── Step 0b5: per-merchant metric listings — deterministic route to agent ──
+    # "provide me the ipg merchants gmv for 04/07/2026" — the legacy LLM-SQL fallback
+    # produced a wrong-window GMV for this shape (36.2M vs the validated 20.1M), and
+    # the merchant-type template used to hijack it entirely. The agent computes these
+    # correctly from the mart. "top N merchants" keeps its own validated mart handler.
+    _ql_pm = question.lower()
+    if (re.search(r"(?i)\bmerchants?\b", question)
+            and any(m in _ql_pm for m in ("gmv", "revenue", "sales value", "transaction value"))
+            and re.search(r"(?i)\b(show|provide|give|list|display|get|rank)\b|\bwise\b|\beach\b|\bper\b", question)
+            and not re.search(r"(?i)\btop\b", question)):
+        try:
+            from agent_engine import answer_with_agent as _awa_pm
+            _pm_out = _awa_pm(question, sql_executor, history=history)
+            if isinstance(_pm_out, dict) and _pm_out.get("answer"):
+                return _pm_out
+        except Exception as _pm_e:
+            print(f"[handle_user_question] per-merchant agent unavailable: {_pm_e}")
 
     # ── Step 0c: semantic router — non-canonical questions go to the agent ──
     # The agent reasons over the real schema and investigates with several
