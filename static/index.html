@@ -874,6 +874,57 @@
       50%       { box-shadow: 0 2px 16px rgba(239,68,68,0.6); }
     }
 
+    /* File attachments */
+    .attach-btn {
+      height: 38px; min-width: 38px;
+      border-radius: 9px; border: none;
+      background: transparent; color: var(--text-3);
+      cursor: pointer; display: flex; align-items: center; justify-content: center;
+      font-size: 16px; flex: 0 0 auto;
+      transition: all var(--transition);
+    }
+    .attach-btn:hover { color: var(--text-1); background: rgba(255,255,255,0.06); }
+
+    .attach-chips {
+      display: none; flex-wrap: wrap; gap: 6px;
+      padding: 0 4px 8px;
+    }
+    .attach-chips.has-files { display: flex; }
+
+    .attach-chip {
+      display: flex; align-items: center; gap: 7px;
+      background: var(--bg-input);
+      border: 1px solid var(--border);
+      border-radius: 9px;
+      padding: 5px 8px;
+      font-size: 12px; color: var(--text-1);
+      max-width: 240px;
+    }
+    .attach-chip img {
+      width: 26px; height: 26px; object-fit: cover;
+      border-radius: 5px; flex: 0 0 auto;
+    }
+    .attach-chip .chip-icon { font-size: 14px; color: var(--text-3); flex: 0 0 auto; }
+    .attach-chip .chip-name {
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .attach-chip .chip-x {
+      border: none; background: transparent; color: var(--text-3);
+      cursor: pointer; font-size: 12px; padding: 2px; flex: 0 0 auto;
+    }
+    .attach-chip .chip-x:hover { color: #ef4444; }
+
+    .msg-attachments {
+      display: flex; flex-wrap: wrap; gap: 6px;
+      margin-bottom: 6px;
+    }
+    .msg-attachments .msg-file {
+      display: inline-flex; align-items: center; gap: 6px;
+      background: rgba(255,255,255,0.1);
+      border-radius: 7px; padding: 3px 8px;
+      font-size: 11.5px;
+    }
+
     .input-hint {
       display: flex; justify-content: space-between; align-items: center;
       margin-top: 7px; font-size: 11px; color: var(--text-3);
@@ -1089,14 +1140,21 @@
 
     <div class="input-area">
       <div class="input-inner">
+        <div class="attach-chips" id="attach-chips"></div>
         <div class="input-box">
+          <input type="file" id="file-input" multiple hidden
+                 accept="image/png,image/jpeg,image/webp,image/gif,.pdf,.docx,.xlsx,.txt,.csv,.json,.md,.log,.sql,.tsv"
+                 onchange="onFilesPicked(event)">
+          <button class="attach-btn" onclick="document.getElementById('file-input').click()" title="Attach images or documents">
+            <i class="fas fa-paperclip"></i>
+          </button>
           <textarea id="q" placeholder="Ask anything about your business data…" rows="1"></textarea>
           <button class="send-btn" id="send-btn" onclick="send()" title="Send (Enter)">
             <i class="fas fa-arrow-up"></i>
           </button>
         </div>
         <div class="input-hint">
-          <span>Enter to send &nbsp;·&nbsp; Shift+Enter for new line</span>
+          <span>Enter to send &nbsp;·&nbsp; Shift+Enter for new line &nbsp;·&nbsp; 📎 attach images/docs</span>
           <span id="status-text"></span>
         </div>
       </div>
@@ -1372,7 +1430,7 @@ function loadSession(id) {
   const inner = document.getElementById("chat-inner");
   inner.innerHTML = "";
   for (const msg of s.messages) {
-    if (msg.role === "user") _appendUserMsgDOM(msg.text, false);
+    if (msg.role === "user") _appendUserMsgDOM(msg.text, false, msg.files);
     else if (msg.role === "ai") _appendAiMsgDOM(msg.data, false);
   }
   renderHistory();
@@ -1783,18 +1841,27 @@ function buildChartConfig(rows) {
 
   const cols = Object.keys(rows[0]);
 
-  // Skip plain list results (lots of store names, IDs)
+  // Skip plain list results (lots of store names, IDs) — but only LONG lists;
+  // short ranked lists (top-10 merchants by GMV) deserve a chart.
   const skipCount = cols.filter(c => _SKIP_CHART_COLS.has(c)).length;
-  if (skipCount >= 2) return null;
+  if (skipCount >= 2 && rows.length > 40) return null;
   if (rows.length > 200) return null;
 
   // ── Detect label column ─────────────────────────────
   const TIME_COLS  = ['day','week_start','year_week','year_month','txn_month','txn_week','txn_day','period','date','month','week'];
   const CAT_COLS   = ['merchant_type','activity_bucket','bucket','category','status','channel','description'];
+  const NAME_COLS  = ['rm_name','gateway_name','bank_name','merchant_name','doing_business_name','pos_merchant_name','name'];
 
   const timeCol = cols.find(c => TIME_COLS.includes(c.toLowerCase()));
   const catCol  = !timeCol && cols.find(c => CAT_COLS.some(k => c.toLowerCase().includes(k)));
-  const labelCol = timeCol || catCol;
+  // Named-entity results (RMs, gateways, merchants, banks) chart as ranked bars
+  // when the set is small; last resort = first non-numeric text column.
+  let nameCol = null;
+  if (!timeCol && !catCol && rows.length <= 40) {
+    nameCol = cols.find(c => NAME_COLS.includes(c.toLowerCase()))
+      || cols.find(c => !_isNumericCol(c, rows[0]) && !/_id$/i.test(c));
+  }
+  const labelCol = timeCol || catCol || nameCol;
 
   if (!labelCol) return null;
 
@@ -1802,6 +1869,11 @@ function buildChartConfig(rows) {
   const skipSet = new Set([labelCol, ..._SKIP_CHART_COLS]);
   let numCols = cols.filter(c => !skipSet.has(c) && _isNumericCol(c, rows[0]));
   if (numCols.length === 0) return null;
+
+  // Mixed scales make unreadable charts — when money columns (LKR/GMV/revenue)
+  // sit next to counts (merchants, subscriptions), chart only the money.
+  const moneyCols = numCols.filter(c => /(_lkr|gmv|revenue|amount|value)/i.test(c));
+  if (moneyCols.length > 0 && moneyCols.length < numCols.length) numCols = moneyCols;
 
   // Priority ordering for metric columns
   const PRIORITY = [
@@ -1983,6 +2055,89 @@ function renderChart(rows) {
   `;
 }
 
+// Render a chart from a backend-provided spec: {type, title, labels, datasets:[{label,data}]}.
+// Used when the data table is a plain merchant list (auto-charting is skipped there).
+function renderChartFromSpec(s) {
+  if (!s || !Array.isArray(s.labels) || !Array.isArray(s.datasets) || s.labels.length === 0) return "";
+  const cid = `chart-${++chartCounter}`;
+  const horizontal = s.orientation === 'horizontal';
+  const stacked = !!s.stacked;
+  const gridC = 'rgba(128,128,128,0.1)';
+  const baseOpts = {
+    responsive: true,
+    indexAxis: horizontal ? 'y' : 'x',
+    plugins: {
+      legend: { display: s.datasets.length > 1, labels: { boxWidth: 12, font: { size: 11 } } },
+      title: s.title ? { display: true, text: s.title, font: { size: 12 } } : { display: false }
+    },
+    scales: {
+      x: { stacked, grid: { color: gridC } },
+      y: { stacked, grid: { color: gridC } }
+    }
+  };
+  const barDatasets = s.datasets.map((d, i) => ({
+    label: d.label, data: d.data,
+    backgroundColor: CHART_PALETTE[i % CHART_PALETTE.length], borderRadius: 4
+  }));
+  const lineDatasets = s.datasets.map((d, i) => ({
+    label: d.label, data: d.data,
+    borderColor: CHART_PALETTE[i % CHART_PALETTE.length],
+    backgroundColor: CHART_PALETTE[i % CHART_PALETTE.length] + '28',
+    tension: 0.35, borderWidth: 2
+  }));
+  // Stacked/horizontal specs only make sense as bars — skip the line toggle there.
+  const supportedTypes = (horizontal || stacked) ? ['bar'] : ['bar', 'line'];
+  const spec = {
+    defaultType: (s.type === 'line') ? 'line' : 'bar',
+    supportedTypes,
+    configs: {
+      bar:  { type: 'bar',  data: { labels: s.labels, datasets: barDatasets },  options: baseOpts },
+      line: { type: 'line', data: { labels: s.labels, datasets: lineDatasets }, options: baseOpts }
+    }
+  };
+  _pendingCharts[cid] = spec;
+
+  const toggleHtml = supportedTypes.length > 1
+    ? supportedTypes.map((t, i) =>
+        `<button class="chart-toggle-btn${i === 0 ? " active" : ""}" onclick="switchChartType('${cid}','${t}',this)">${t.charAt(0).toUpperCase() + t.slice(1)}</button>`
+      ).join("")
+    : "";
+  const btnHtml = `<div class="chart-toggle-btns">${toggleHtml}` +
+    `<button class="chart-toggle-btn" onclick="downloadChart('${cid}')" title="Download chart as PNG">` +
+    `<i class="fas fa-download"></i> Download</button></div>`;
+
+  return `
+    <div class="resp-section">
+      <div class="resp-label"><i class="fas fa-chart-bar"></i> Chart</div>
+      <div class="chart-card">
+        ${btnHtml}
+        <canvas id="${cid}"></canvas>
+      </div>
+    </div>
+  `;
+}
+
+// Download the rendered chart as a PNG (with an opaque background so it isn't
+// transparent on save). Keeps everything in-chat — no separate file to open.
+function downloadChart(cid) {
+  const inst = _chartInstances[cid];
+  if (!inst) return;
+  const src = inst.canvas;
+  const tmp = document.createElement('canvas');
+  tmp.width = src.width; tmp.height = src.height;
+  const ctx = tmp.getContext('2d');
+  const card = src.closest('.chart-card');
+  let bg = card ? getComputedStyle(card).backgroundColor : '';
+  if (!bg || bg === 'rgba(0, 0, 0, 0)' || bg === 'transparent') bg = '#ffffff';
+  ctx.fillStyle = bg;
+  ctx.fillRect(0, 0, tmp.width, tmp.height);
+  ctx.drawImage(src, 0, 0);
+  const a = document.createElement('a');
+  a.href = tmp.toDataURL('image/png');
+  a.download = 'mcc-drop-chart.png';
+  a.click();
+}
+
 function flushCharts() {
   for (const [cid, spec] of Object.entries(_pendingCharts)) {
     const el = document.getElementById(cid);
@@ -2041,6 +2196,15 @@ function buildResponseHtml(data) {
     `;
   }
 
+  // Conversational replies (meta answers, learned-rule acknowledgments, file
+  // analysis) have no SQL/table — render just the answer, never an empty
+  // "Query Results" block.
+  const _conversational = ["conversation", "learning", "file_analysis"].includes(responseType)
+    || (!data.sql && (!data.result || data.result.length === 0) && !data.timeseries);
+  if (_conversational) {
+    return renderAnalysis(data.insights || data.answer || "");
+  }
+
   // Data query
   let rows = null;
   if (data.timeseries) {
@@ -2075,7 +2239,9 @@ function buildResponseHtml(data) {
     </div>
   `;
 
-  const chartHtml  = (!isDbError && rows && rows.length >= 2) ? renderChart(rows) : "";
+  const chartHtml  = (!isDbError && data.chart)
+    ? renderChartFromSpec(data.chart)
+    : ((!isDbError && rows && rows.length >= 2) ? renderChart(rows) : "");
   const insightsHtml = isDbError ? "" : renderAnalysis(data.insights);
 
   return sqlHtml + tableHtml + chartHtml + insightsHtml;
@@ -2084,15 +2250,21 @@ function buildResponseHtml(data) {
 // ═══════════════════════════════════════════════════════
 // DOM HELPERS
 // ═══════════════════════════════════════════════════════
-function _appendUserMsgDOM(text, animate = true) {
+function _appendUserMsgDOM(text, animate = true, files = null) {
   const welcome = document.querySelector(".welcome");
   if (welcome) welcome.remove();
   const row = document.createElement("div");
   row.className = "msg-row user";
   if (!animate) row.style.animation = "none";
+  let filesHtml = "";
+  if (Array.isArray(files) && files.length) {
+    filesHtml = `<div class="msg-attachments">` + files.map(name =>
+      `<span class="msg-file"><i class="fas fa-paperclip"></i> ${escHtml(name)}</span>`
+    ).join("") + `</div>`;
+  }
   row.innerHTML = `
     <div class="avatar user"><i class="fas fa-user"></i></div>
-    <div class="bubble user">${md(text)}</div>
+    <div class="bubble user">${filesHtml}${md(text)}</div>
   `;
   document.getElementById("chat-inner").appendChild(row);
 }
@@ -2113,10 +2285,10 @@ function _appendAiMsgDOM(data, animate = true) {
   flushAndBindCharts();
 }
 
-function addUserMsg(text) {
+function addUserMsg(text, files = null) {
   if (!currentSessionId) createSession();
-  _appendUserMsgDOM(text);
-  appendMessage({ role: "user", text });
+  _appendUserMsgDOM(text, true, files);
+  appendMessage({ role: "user", text, files: files && files.length ? files : undefined });
   scrollBottom();
 }
 
@@ -2201,6 +2373,47 @@ async function sendFeedback(barId, correct) {
 }
 
 // ═══════════════════════════════════════════════════════
+// FILE ATTACHMENTS
+// ═══════════════════════════════════════════════════════
+let attachments = [];  // File objects staged for the next message
+const MAX_ATTACH = 5;
+const MAX_ATTACH_MB = 10;
+
+function onFilesPicked(e) {
+  addAttachments(e.target.files);
+  e.target.value = ""; // allow re-picking the same file
+}
+
+function addAttachments(fileList) {
+  for (const f of fileList) {
+    if (attachments.length >= MAX_ATTACH) { showToast(`Max ${MAX_ATTACH} files per message`); break; }
+    if (f.size > MAX_ATTACH_MB * 1024 * 1024) { showToast(`${f.name} is too large (max ${MAX_ATTACH_MB} MB)`); continue; }
+    attachments.push(f);
+  }
+  renderAttachChips();
+}
+
+function removeAttachment(i) {
+  attachments.splice(i, 1);
+  renderAttachChips();
+}
+
+function renderAttachChips() {
+  const el = document.getElementById("attach-chips");
+  el.classList.toggle("has-files", attachments.length > 0);
+  el.innerHTML = attachments.map((f, i) => {
+    const isImg = f.type.startsWith("image/");
+    const visual = isImg
+      ? `<img src="${URL.createObjectURL(f)}" alt="">`
+      : `<i class="fas fa-file-lines chip-icon"></i>`;
+    return `<div class="attach-chip">${visual}
+      <span class="chip-name" title="${escHtml(f.name)}">${escHtml(f.name)}</span>
+      <button class="chip-x" onclick="removeAttachment(${i})" title="Remove"><i class="fas fa-times"></i></button>
+    </div>`;
+  }).join("");
+}
+
+// ═══════════════════════════════════════════════════════
 // SEND
 // ═══════════════════════════════════════════════════════
 let _currentAbortController = null;
@@ -2216,10 +2429,13 @@ async function send() {
   }
 
   const q = ta.value.trim();
-  if (!q) return;
+  const files = attachments.slice();
+  if (!q && !files.length) return;
 
   ta.value = "";
   autoGrow(ta);
+  attachments = [];
+  renderAttachChips();
 
   _currentAbortController = new AbortController();
 
@@ -2228,22 +2444,57 @@ async function send() {
   btn.innerHTML = '<i class="fas fa-stop"></i><span style="font-size:12px;">Stop</span>';
   btn.title = "Stop generating";
 
-  addUserMsg(q);
+  addUserMsg(q || "Analyze the attached file(s)", files.map(f => f.name));
   setStatus("Thinking…");
   addThinking();
 
+  // Build recent conversation history for follow-up resolution.
+  // The current question was just pushed by addUserMsg(q), so drop the last entry.
+  let history = [];
+  const _s = currentSession();
+  if (_s && Array.isArray(_s.messages)) {
+    history = _s.messages
+      .slice(0, -1)
+      .slice(-6)
+      .map(m => {
+        if (m.role === "user") return { role: "user", content: m.text || "" };
+        // /ask responses carry the answer in "insights"; include the SQL so
+        // meta questions ("how did you analyze that") can be answered concretely.
+        const d = m.data || {};
+        let content = d.insights || d.answer || "";
+        const sqlStr = typeof d.sql === "string" ? d.sql : (d.sql ? JSON.stringify(d.sql) : "");
+        if (content && sqlStr) content += `\n[SQL used: ${sqlStr.slice(0, 500)}]`;
+        return { role: "assistant", content };
+      })
+      .filter(m => m.content);
+  }
+
   try {
-    const res = await fetch("/ask", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ question: q }),
-      signal: _currentAbortController.signal,
-    });
+    let fetchOpts;
+    if (files.length) {
+      // Multipart request carries the files next to the question.
+      const fd = new FormData();
+      fd.append("question", q);
+      fd.append("history", JSON.stringify(history));
+      for (const f of files) fd.append("files", f, f.name);
+      fetchOpts = { method: "POST", body: fd, signal: _currentAbortController.signal };
+    } else {
+      fetchOpts = {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ question: q, history }),
+        signal: _currentAbortController.signal,
+      };
+    }
+    const res = await fetch("/ask", fetchOpts);
     if (res.status === 401) {
       window.location.href = "/login";
       return;
     }
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    if (!res.ok) {
+      const errBody = await res.json().catch(() => null);
+      throw new Error((errBody && errBody.error) || `HTTP ${res.status}`);
+    }
     const data = await res.json();
     removeThinking();
     setStatus("");
@@ -2253,6 +2504,8 @@ async function send() {
     setStatus("");
     if (err.name === "AbortError") {
       addErrorMsg("Request cancelled.");
+    } else if (err.message && !/failed to fetch|networkerror|HTTP \d+/i.test(err.message)) {
+      addErrorMsg(err.message);
     } else {
       addErrorMsg("Connection error - please check the server and try again.");
     }
@@ -2297,6 +2550,11 @@ const ta = document.getElementById("q");
 ta.addEventListener("input", () => autoGrow(ta));
 ta.addEventListener("keydown", e => {
   if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
+});
+// Paste a screenshot straight into the chat
+ta.addEventListener("paste", e => {
+  const files = [...(e.clipboardData?.files || [])].filter(f => f.type.startsWith("image/"));
+  if (files.length) { e.preventDefault(); addAttachments(files); }
 });
 
 window.addEventListener("pagehide", () => {

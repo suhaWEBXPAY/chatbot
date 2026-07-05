@@ -1,0 +1,60 @@
+Connection pool created (size=8)
+
+FLAG   LANE   TOOL                       QUESTION
+----------------------------------------------------------------------------------------------------
+
+# GMV / revenue / volume
+OK     db     ipg_summary                what was the IPG revenue for March 2025
+OK     db     combined_summary           total GMV last month
+OK     db     pos_summary                POS revenue for 2026
+OK     db     combined_summary           how many transactions in June 2026
+ADHOC  db     adhoc_sql                  what is the loss for month of december 2025   <- AI-written SQL
+OK     db     combined_summary           whats our revenue for the month of february
+
+# channel split / type
+OK     db     merchant_type              how many merchants use IPG only   <- no explicit year in SQL
+OK     db     merchant_type              merchants with both IPG and POS   <- no explicit year in SQL
+OK     db     merchant_type              pos only merchants   <- no explicit year in SQL
+
+# status
+OK     db     timeseries                 approved vs declined IPG transactions for 2025 month
+ADHOC  db     adhoc_sql                  show failed transactions by provider   <- AI-written SQL
+OK     db     timeseries                 abandoned payments last month
+
+# trend / timeseries
+OK     db     timeseries                 monthly revenue overview for 2025
+OK     db     timeseries                 weekly GMV trend for 2026
+OK     db     timeseries                 daily transactions from 2026-06-01 to 2026-06-15
+
+# merchant activity
+OK     db     non_transacting_merchants  pos non transacting merchants 2026
+OK     db     non_transacting_merchants  who are the non transacting merchants for 2026 janua
+OK     db     non_transacting_merchants  merchant in pos with no transaction for january 2026
+OK     db     active_transacting_merchants active transacting merchants for may 2026
+OK     db     merchant_onboarding        how many merchants were onboarded last month
+
+# ranking
+OK     db     top_merchants              top 10 merchants by GMV last month
+OK     db     merchant_movers            which merchants improved the most in june vs may
+
+# comparison / diagnosis
+OK     db     period_comparison          compare POS and IPG revenue for May and June 2026
+FAIL   db     adhoc_sql                  why did GMV drop in june compared to may   <- ["unknown table(s): ['all_approved_transactions', 'ipg_trans
+OK     db     merchant_movers            merchants who dropped more than 10% in june compared
+OK     db     period_comparison          2025 vs 2026 GMV
+
+# multi-step / adhoc-expected
+ADHOC  db     adhoc_sql                  did the merchants onboarded last month do any transa   <- AI-written SQL
+ADHOC  db     adhoc_sql                  merchants who signed up but never paid   <- AI-written SQL
+
+# non-db
+OK     web    -                          what are the latest CBSL regulations on payment gate   <- web
+OK     chit_chat -                          hello   <- chit_chat
+
+# real logged questions
+OK     db     timeseries                 give me information from time period january 2nd to 
+OK     db     timeseries                 can you provide me the IPG transactions approved and
+
+====================================================================================================
+SUMMARY  total=32  OK=27  ADHOC=4  FAIL=1  DATE?=0
+FAIL = must fix. ADHOC = review whether a validated builder should cover it. DATE? = wrong/again year.

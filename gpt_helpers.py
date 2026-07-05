@@ -13,7 +13,14 @@ from concurrent.futures import ThreadPoolExecutor
 # NOTE: Do NOT hardcode API keys in code. Use an environment variable instead.
 # export OPENAI_API_KEY="..."
 load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+# Gemini only. Used via Gemini's OpenAI-compatible endpoint, so all the
+# client.chat.completions.create(...) calls below work unchanged.
+client = OpenAI(
+    api_key=os.getenv("GEMINI_API_KEY"),
+    base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
+)
+CHAT_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 
 
 # =========================================================
@@ -21,7 +28,8 @@ client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 # =========================================================
 def load_schema() -> str:
     try:
-        with open("schema.txt", "r", encoding="utf-8") as f:
+        _schema_path = os.path.join(os.path.dirname(__file__), "schema.txt")
+        with open(_schema_path, "r", encoding="utf-8") as f:
             return f.read().strip()
     except Exception:
         # Fallback minimal schema
@@ -99,6 +107,16 @@ def load_wrong_feedback(question: str, max_entries: int = 5) -> str:
         lines.append(f'- Question: "{e["question"]}"{sql_snippet}')
 
     return "\n".join(lines)
+
+
+def learned_rules_block() -> str:
+    """Durable rules the user taught in chat (learning_store) — injected into
+    every SQL-generation and insight prompt so corrections stick."""
+    try:
+        from learning_store import lessons_block
+        return lessons_block()
+    except Exception:
+        return ""
 
 
 def get_cached_sql(question: str, threshold: float = 0.72) -> str | None:
@@ -598,6 +616,10 @@ def analyze_intent(question: str):
         intent["time_grain"] = "week"
     elif any(k in ql for k in ["monthly", "month wise", "month-wise", "per month", "by month", "each month"]):
         intent["time_grain"] = "month"
+    elif (sum(1 for _wd in ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday") if _wd in ql) >= 2
+          or "day by day" in ql or "day-by-day" in ql or "day to day" in ql or "from monday" in ql):
+        # "monday to friday", "what i did each day last week" → day-by-day breakdown
+        intent["time_grain"] = "day"
 
     # ✅ CHANGE: POS implied detection so "dfcc rev ..." or "hnb rev ..." routes to POS even without word "pos"
     pos_implied = False
@@ -821,19 +843,14 @@ def build_pos_sql(intent: dict) -> str:
     END
 ) AS Transaction_Count"""
 
-    # ── Revenue: adjusted_amount × (m.mdr_rate − m.cost_rate) / 100 ─────────────────
-    # sale/amex → +amount, void_sale/void_amex → −amount (direct net, no pair key needed)
-    # Joined via tbl_pos_store_bank_mid on store_id + bank_merchant_mid.
-    # Transactions with no matching store_mid entry → m.mdr_rate = 0 → revenue = 0.
-    adj_amt = f"""CASE
-        WHEN {txn_norm} IN ('sale','amex')                               THEN  t.amount
-        WHEN {txn_norm} IN ('void_sale','void_amex','void-sale','void-amex') THEN -t.amount
-        ELSE 0
+    # ── Revenue: UNPAIRED sales only (same pair-key basis as GMV) × (t.mdr_rate − cost)/100.
+    # MDR = transaction's OWN t.mdr_rate (always present); cost = deduped m.cost_rate, fallback 1.7.
+    # Voids and paired sales contribute NULL. This matches Power BI exactly.
+    row_rev = f"""CASE
+        WHEN {txn_norm} IN ('sale','amex') AND pk_as.pair_key IS NULL
+        THEN ROUND(t.amount * (COALESCE(t.mdr_rate, 0) - COALESCE(m.cost_rate, 1.7)) / 100.0, 2)
+        ELSE NULL
     END"""
-
-    row_rev = f"""ROUND(
-        ({adj_amt}) * (COALESCE(m.mdr_rate, 0) - COALESCE(m.cost_rate, 0)) / 100.0
-    , 2)"""
 
     # ── DFCC Revenue (PVI 6) ────────────────────────────────────────────────────────
     dfcc_expr = f"""SUM(
@@ -890,11 +907,16 @@ def build_pos_sql(intent: dict) -> str:
             dfcc_expr, hnb_expr, total_expr,
         ])
 
-    # Join tbl_pos_store_bank_mid for mdr_rate and cost_rate used in revenue calculation.
-    store_mid_join = """LEFT JOIN webxpay_master.tbl_pos_store_bank_mid m
+    # Join deduped cost_rate per (store, MID) for the revenue calc. No is_active filter
+    # (matches Power BI); MAX(cost_rate) + GROUP BY prevents duplicate-row inflation.
+    store_mid_join = """LEFT JOIN (
+        SELECT store_id, bank_merchant_mid, MAX(cost_rate) AS cost_rate
+        FROM webxpay_master.tbl_pos_store_bank_mid
+        WHERE cost_rate IS NOT NULL
+        GROUP BY store_id, bank_merchant_mid
+    ) m
     ON  m.store_id          = t.store_id
-    AND m.bank_merchant_mid = t.bank_merchant_mid
-    AND m.is_active         = 1"""
+    AND m.bank_merchant_mid = t.bank_merchant_mid"""
 
     # Merchant grouping: any question that mentions "merchant" or asks for top/best/ranking,
     # or uses a threshold like "below 350k", "above 1m", "less than 500000"
@@ -1858,7 +1880,6 @@ ORDER BY s.doing_business_name;
 SELECT
     s.store_id,
     s.doing_business_name                        AS merchant_name,
-    last_txn.last_successful_transaction_date,
     'IPG Non-Transacting'                        AS status
 FROM webxpay_master.tbl_store s
 INNER JOIN (
@@ -1873,13 +1894,6 @@ LEFT JOIN (
     WHERE o.payment_status_id = 2
       {ipg_date}
 ) did_txn ON did_txn.store_id = s.store_id
-LEFT JOIN (
-    SELECT o.store_id, MAX(p.date_time_transaction) AS last_successful_transaction_date
-    FROM webxpay_master.tbl_order o
-    JOIN webxpay_master.tbl_payment p ON p.payment_id = o.payment_id
-    WHERE o.payment_status_id = 2
-    GROUP BY o.store_id
-) last_txn ON last_txn.store_id = s.store_id
 WHERE s.free_trail = 0
   AND s.is_active = 1
   AND did_txn.store_id IS NULL
@@ -2056,7 +2070,7 @@ WHERE {base_where};
         return f"""
 SELECT COUNT(DISTINCT s.store_id) AS active_merchants_pos
 FROM webxpay_master.tbl_store s
-INNER JOIN (SELECT DISTINCT store_id FROM webxpay_master.tbl_pos_store_bank_mid) p
+INNER JOIN (SELECT DISTINCT store_id FROM webxpay_master.tbl_pos_store_bank_mid WHERE is_active = 1) p
     ON p.store_id = s.store_id
 WHERE {base_where};
 """.strip()
@@ -2075,7 +2089,7 @@ SELECT
 FROM webxpay_master.tbl_store s
 LEFT JOIN (SELECT DISTINCT store_id FROM webxpay_master.tbl_store_payment_gateway_2) g
     ON g.store_id = s.store_id
-LEFT JOIN (SELECT DISTINCT store_id FROM webxpay_master.tbl_pos_store_bank_mid) p
+LEFT JOIN (SELECT DISTINCT store_id FROM webxpay_master.tbl_pos_store_bank_mid WHERE is_active = 1) p
     ON p.store_id = s.store_id
 WHERE {base_where};
 """.strip()
@@ -2307,10 +2321,14 @@ ORDER BY FIELD(merchant_type, 'IPG and POS', 'IPG Only', 'POS Only'), merchant_n
 # GENERIC SQL VIA GPT
 # =========================================================
 def extract_sql_from_text(text: str) -> str:
-    code_block = re.search(r"```sql\s*(.*?)```", text, re.DOTALL | re.IGNORECASE)
+    # Accept any fenced code block: ```sql, ```mysql, or a bare ``` fence. Gemini often
+    # uses ```mysql, which previously slipped through and left the word "mysql" in front
+    # of the query, breaking the read-only SELECT check in db.run_sql.
+    code_block = re.search(r"```[a-zA-Z]*\s*(.*?)```", text, re.DOTALL)
     if code_block:
         return code_block.group(1).strip()
-    return text.strip()
+    # No fence — strip a leading language tag if the model emitted one bare.
+    return re.sub(r"^(?:sql|mysql)\s+", "", text.strip(), flags=re.IGNORECASE)
 
 
 def build_generic_sql(question: str, schema: str) -> str:
@@ -2340,10 +2358,12 @@ END
     _current_year = _today.year
     _ytd_cutoff = _today.strftime("%Y-%m-%d")
     wrong_feedback = load_wrong_feedback(question)
+    _learned = learned_rules_block()
 
     system_prompt = f"""
 You are an expert MySQL SQL generator for a payment gateway system.
 {(chr(10) + wrong_feedback + chr(10)) if wrong_feedback else ""}
+{(chr(10) + _learned + chr(10)) if _learned else ""}
 
 CURRENT DATE: {_today}
 IMPORTANT YEAR AWARENESS:
@@ -2405,6 +2425,11 @@ CRITICAL RULES FOR POS (tbl_pos_transactions) — NEVER DEVIATE FROM THESE:
 Other rules:
 - Use ONLY tables/columns from this schema.
 - Do NOT invent tables or columns.
+- JOINS: Use the "Database Relationships" section in the schema below for ALL joins.
+  Join ONLY on the listed key pairs (e.g. tbl_order.store_id -> tbl_store.store_id).
+  NEVER join on a guessed or merely same-named column that is not listed there.
+  The tbl_pos_transactions <-> tbl_pos_store_bank_mid join is composite: match on
+  BOTH store_id AND bank_merchant_mid.
 - Generate exactly ONE SELECT query (no INSERT/UPDATE/DELETE/DDL).
 - Prefer joining tbl_order, tbl_store, tbl_payment when relevant for IPG queries.
 - For IPG transaction date, prefer p.date_time_transaction over o.date_added.
@@ -2425,7 +2450,7 @@ Do not explain, only output the SQL.
 """
 
     resp = client.chat.completions.create(
-        model="gpt-4.1-mini",
+        model=CHAT_MODEL,
         messages=[
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
@@ -2496,6 +2521,7 @@ def refine_sql_with_llm(
         base_sql_blob = "NONE"
 
     wrong_feedback = load_wrong_feedback(question)
+    _learned = learned_rules_block()
 
     system_prompt = f"""
 You are a senior MySQL query engineer for a payment gateway like WEBXPAY.
@@ -2506,6 +2532,7 @@ You will be given:
 - Several CANONICAL BASE QUERIES that are known-correct for things like revenue, MDR, volume, GMV, FX, etc.
 - The database schema.
 {(chr(10) + wrong_feedback + chr(10)) if wrong_feedback else ""}
+{(chr(10) + _learned + chr(10)) if _learned else ""}
 
 YOUR JOB:
 1. First, deeply understand the user's question.
@@ -2575,7 +2602,7 @@ AVAILABLE BASE QUERIES (may be NONE):
 """
 
     resp = client.chat.completions.create(
-        model="gpt-4.1-mini",
+        model=CHAT_MODEL,
         messages=[
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
@@ -2734,6 +2761,71 @@ def generate_sql(question: str, schema: str | None = None) -> str:
 # =========================================================
 # INSIGHT + ANSWER LAYER (OPTIONAL)  **DEEPER ANALYSIS**
 # =========================================================
+def _compute_result_facts(rows):
+    """Compute facts over the FULL result set so superlatives ('highest/lowest/peak')
+    and coverage ('does June exist?') are answered from all rows — NOT from the 50-row
+    sample sent in the prompt. Returns a compact text block, or "" when not applicable.
+
+    Why this exists: the prompt truncates large results to 50 rows. Without this, the
+    LLM computes max/min from only the first 50 rows and even claims later periods are
+    "missing" (e.g. a 175-row Jan–Jun daily breakdown looked like "Jan–Feb only")."""
+    if not isinstance(rows, list) or not rows or not isinstance(rows[0], dict):
+        return ""
+
+    def _to_num(v):
+        if isinstance(v, bool):
+            return None
+        if isinstance(v, (int, float)):
+            return float(v)
+        if isinstance(v, str):
+            s = v.replace(",", "").replace("Rs", "").strip()
+            try:
+                return float(s)
+            except ValueError:
+                return None
+        return None
+
+    cols = list(rows[0].keys())
+
+    # Label column = first mostly-non-numeric column (date/month/name); used to
+    # attribute each extreme to a row. Falls back to the first column.
+    label_col = None
+    for c in cols:
+        non_numeric = sum(1 for r in rows if _to_num(r.get(c)) is None)
+        if non_numeric > len(rows) / 2:
+            label_col = c
+            break
+    if label_col is None:
+        label_col = cols[0]
+
+    lines = []
+    # Coverage of the label column so "does period X exist" is answerable.
+    first_label, last_label = rows[0].get(label_col), rows[-1].get(label_col)
+    lines.append(
+        f"- Rows span '{label_col}' from {first_label} to {last_label} "
+        f"({len(rows)} rows total). The full range above IS present in the data — "
+        f"never say a value within this span is missing."
+    )
+
+    for c in cols:
+        if c == label_col:
+            continue
+        vals = [(n, r.get(label_col)) for r in rows if (n := _to_num(r.get(c))) is not None]
+        if not vals:
+            continue
+        mx = max(vals, key=lambda x: x[0])
+        mn = min(vals, key=lambda x: x[0])
+        lines.append(
+            f"- {c}: max={mx[0]:,.2f} (at {mx[1]}), min={mn[0]:,.2f} (at {mn[1]})"
+        )
+
+    return (
+        "PRECOMPUTED FACTS (computed in code over ALL rows — these are authoritative; "
+        "use THESE exact figures for any highest/lowest/peak/range/coverage claim, and "
+        "do NOT recompute extremes from the sampled rows below):\n" + "\n".join(lines)
+    )
+
+
 def generate_insights(question: str, sql_result):
     _today = datetime.now().date()
     _current_year = _today.year
@@ -2743,15 +2835,28 @@ def generate_insights(question: str, sql_result):
     _row_count = len(sql_result) if isinstance(sql_result, list) else None
     _row_count_note = f"\nTOTAL ROWS RETURNED: {_row_count} (use this exact number — do NOT guess or infer a different count)" if _row_count is not None else ""
 
-    # Trim large result sets to avoid bloating the prompt — but preserve count above
+    # Precompute extremes/coverage over the FULL set BEFORE truncating (critical:
+    # the LLM cannot scan rows it never receives — see _compute_result_facts).
+    _facts = _compute_result_facts(sql_result)
+    _facts_block = f"\n{_facts}\n" if _facts else ""
+
+    # Trim large result sets to avoid bloating the prompt — but preserve count + facts above
     _result_for_prompt = sql_result
-    if isinstance(sql_result, list) and len(sql_result) > 50:
+    _is_sampled = isinstance(sql_result, list) and len(sql_result) > 50
+    if _is_sampled:
         _result_for_prompt = sql_result[:50]
+    _data_label = (
+        "DATA (SAMPLE — first 50 of the rows above; the full set was used to compute "
+        "PRECOMPUTED FACTS. Treat these rows as examples only, NOT the complete data. "
+        "Do NOT infer coverage, totals, or extremes from this sample)"
+        if _is_sampled
+        else "DATA"
+    )
 
     prompt = f"""You are a senior data analyst for WEBXPAY (Sri Lankan payment gateway).
 Today: {_today}. Current year {_current_year} is YTD only (data up to {_ytd_label}) — flag this when comparing to prior full years.
 {_row_count_note}
-
+{_facts_block}
 COLUMN NAMING RULES — read column names carefully before writing insights:
 - Columns starting with `ipg_` are IPG-only (ipg_gmv_lkr, ipg_revenue_lkr, ipg_txn_volume, ipg_mdr_lkr, ipg_volume). NEVER label these "total GMV" or "all channels" — call them "IPG GMV", "IPG revenue", "IPG volume", etc.
 - Columns starting with `pos_` are POS-only (pos_gmv_lkr, pos_total_revenue_lkr, pos_volume, pos_hnb_revenue_lkr, pos_dfcc_revenue_lkr).
@@ -2764,33 +2869,60 @@ COLUMN NAMING RULES — read column names carefully before writing insights:
 
 QUESTION: {question}
 
-DATA (showing up to 50 rows — see TOTAL ROWS RETURNED above for full count): {_result_for_prompt}
+{_data_label}: {_result_for_prompt}
 
-Write a concise business insight in this structure:
-### 1. Executive summary
-- 3-5 bullets directly answering the question with key numbers (use thousand separators, Rs for LKR).
+Write the answer as a natural, conversational reply — like you're explaining it to a colleague, NOT a formal report. Rules for the style:
+- Write in flowing prose: one main paragraph (add a short second one only if there's genuinely more worth saying). NO numbered sections, NO "Executive summary / Analysis / Trends / Risks / Actions" headings, NO bullet lists.
+- Lead by directly answering the question in the first sentence.
+- **Bold** the key numbers and the most important takeaways (use markdown **like this**); leave ordinary connecting text unbolded — bold only what actually matters so it stands out.
+- Weave in the notable drivers, trend, or any anomaly inline within the sentences, but only mention what's genuinely relevant — don't force topics that aren't in the data.
+- Use thousand separators and "Rs" for LKR. Keep it tight and readable, not padded.
 
-### 2. Analysis
-- Key drivers, breakdowns, top contributors (top 3-5 if ranked data). Margin = revenue ÷ GMV if both present.
+ACCURACY when comparing rows (critical — do not approximate):
+- If a PRECOMPUTED FACTS block is present above, it is the single source of truth for every highest/lowest/peak/range/coverage statement — quote its max/min values and their labels exactly. NEVER derive a "highest"/"lowest"/"peak" or a date range from the sampled DATA rows; the sample is incomplete and using it for extremes is a critical error.
+- When no PRECOMPUTED FACTS block is present, scan EVERY row and pick the actual maximum/minimum — do not eyeball it.
+- When you state a range ("around X to Y"), X must be the true minimum and Y the true maximum (from PRECOMPUTED FACTS when available) — don't skip rows.
+- Don't claim an item is highest unless it truly is the largest value. If two are close, say so or name the real order.
+- Quote numbers as they appear; never round in a way that changes which value is larger.
+- NEVER state or imply that a date/period/item is "missing", "not included", or that the data "only covers" part of the requested range unless that is shown by the PRECOMPUTED FACTS span. The sample ending early does NOT mean the data ends early.
 
-### 3. Trends
-- Describe trend if time column exists. If not, state trend analysis not possible.
+ANTI-FABRICATION (most important rule — overrides everything else):
+- State ONLY numbers, merchant names, dates, and comparisons that LITERALLY appear in the DATA above. Never invent, guess, or infer a value, a merchant, or a per-date/per-period figure that isn't physically present in the rows.
+- If the question asks "why" something happened, or asks about a metric/date/comparison the DATA does NOT contain — e.g. it asks about a drop between two dates but the rows have no date column and no amount column, or the rows are just a list of names/types — then DO NOT manufacture an explanation and DO NOT name specific merchants as causes. Instead say plainly: the data retrieved for this doesn't include the figures needed to answer it, state what the rows DO contain, and stop. An invented or guessed answer is a critical failure — far worse than saying the data isn't sufficient.
+- Do not attribute a cause (e.g. "merchant X dropped") unless that merchant's before/after values are actually in the rows.
 
-### 4. Risks & anomalies
-- Outliers, nulls, gaps. If none, say data looks consistent.
+DATA SOURCE VOICE (critical):
+- YOU retrieve all data directly from the company database. The DATA above is what was fetched for this question. NEVER ask the user to share, provide, paste, send, or upload data, numbers, or a breakdown — they don't supply data, you do.
+- Never say "if you share…", "if you can provide…", "please give me…", or "the data you provided". If the rows above don't fully answer the question, say what they DO show, and if a different cut is needed, say the user can simply ask for it (e.g., "ask for the monthly breakdown and I'll pull it") — framed as you fetching it, never them.
 
-### 5. Actions
-- 3 concise action-oriented bullets for leadership.
+{learned_rules_block()}
 
-Base everything strictly on the data. If something is missing from the data, say so."""
+Base everything strictly on the data. If something is missing from the data, say so naturally in the flow."""
 
     resp = client.chat.completions.create(
-        model="gpt-4.1-mini",
+        model=CHAT_MODEL,
         messages=[{"role": "user", "content": prompt}],
         temperature=0.25,
-        max_tokens=800,
+        max_tokens=2000,
+        # Gemini 2.5 thinks by default and thinking tokens eat max_tokens, truncating
+        # the visible answer mid-sentence. We're only summarizing already-fetched data,
+        # so disable thinking. (Ignored harmlessly by non-Gemini providers.)
+        reasoning_effort="none",
     )
-    return resp.choices[0].message.content.strip()
+    text = resp.choices[0].message.content.strip()
+    # Hard stop on placeholder/example content ("John Smith", "actual results would
+    # be inserted here") — showing fabricated figures is worse than no summary.
+    try:
+        from agent_engine import _PLACEHOLDER_PAT
+        if _PLACEHOLDER_PAT.search(text):
+            print("[generate_insights] placeholder content detected — suppressed")
+            return ("The figures for this question are in the results table above — "
+                    "every value there comes directly from the database. I couldn't "
+                    "produce a reliable written summary this time; ask me to break the "
+                    "result down differently if you'd like more detail.")
+    except Exception:
+        pass
+    return text
 
 
 def build_short_answer(question: str, sql_result):
@@ -2983,6 +3115,11 @@ def detect_time_granularity(question: str) -> str | None:
     if any(k in ql for k in ["monthly", "month wise", "monthwise", "month-wise", "per month", "by month", "each month"]):
         return "month"
 
+    # weekday range ("monday to friday") / day-by-day phrasing → daily breakdown
+    if (sum(1 for _wd in ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday") if _wd in ql) >= 2
+            or "day by day" in ql or "day-by-day" in ql or "day to day" in ql or "from monday" in ql):
+        return "day"
+
     return None
 
 
@@ -3003,7 +3140,9 @@ def get_period_from_question(question: str):
 # ✅ ADD: IPG time series SQL builder (day/week/month)
 def build_ipg_timeseries_sql(ds: str, de: str, grain: str) -> str:
     if grain == "day":
-        bucket = "DATE(p.date_time_transaction)"
+        # Format as ISO date string so it sorts chronologically (a raw DATE
+        # serializes to "Fri, 05 Jun 2026 ..." which sorts alphabetically by weekday).
+        bucket = "DATE_FORMAT(p.date_time_transaction, '%Y-%m-%d')"
         alias = "day"
         group_by = bucket
         order_by = bucket
@@ -3149,7 +3288,23 @@ def build_merchant_onboarding_sql(question: str, ds: str = None, de: str = None)
     _m = _merchant_name_re.match(question.strip())
     if _m:
         candidate = _m.group(1).strip()
-        if candidate.lower() not in _generic_starts and len(candidate) > 4:
+        # Guard against natural-language questions being misread as a merchant name,
+        # e.g. "how many merchants were onboarded" -> candidate "how many merchants were".
+        # Reject if the FIRST word is a generic/question word, or the phrase contains a
+        # count/aggregate marker. Only a real name (e.g. "ABC Company") should pass.
+        _cl = candidate.lower()
+        _first_word = _cl.split()[0] if candidate.split() else ""
+        _agg_markers = ("how many", "number of", "count", "total number", "how much")
+        _question_words = _generic_starts | {
+            "did", "do", "does", "are", "were", "have", "has", "had", "can", "could",
+            "would", "should", "which", "any", "these", "those", "of", "there",
+        }
+        _looks_like_question = (
+            _first_word in _question_words
+            or "merchant" in _cl            # "...the merchants..." = a question, not a name
+            or any(mk in _cl for mk in _agg_markers)
+        )
+        if not _looks_like_question and len(candidate) > 4:
             safe_name = candidate.replace("'", "''")
             return f"""
 SELECT
@@ -3172,6 +3327,41 @@ ORDER BY onboard_date DESC;
     else:
         date_filter = "COALESCE(s.credit_review_approved_date, s.date_registered) >= DATE_SUB(CURDATE(), INTERVAL 3 MONTH) AND COALESCE(s.credit_review_approved_date, s.date_registered) < CURDATE()"
 
+    # Channel BREAKDOWN: "ipg or pos", "ipg vs pos", "by channel", "split" → return
+    # IPG / POS / both counts side by side (a merchant can be on both channels, so the
+    # columns overlap; total = distinct merchants on either channel).
+    _wants_breakdown = any(p in ql for p in [
+        "ipg or pos", "pos or ipg", "ipg vs pos", "pos vs ipg", "ipg / pos",
+        "by channel", "channel breakdown", "breakdown by channel", "split by channel",
+        "how many are ipg", "how many are pos", "ipg and pos",
+    ])
+    if _wants_breakdown:
+        return f"""
+SELECT
+    SUM(has_ipg)                                   AS ipg_merchants,
+    SUM(has_pos)                                   AS pos_merchants,
+    SUM(CASE WHEN has_ipg = 1 AND has_pos = 1 THEN 1 ELSE 0 END) AS both_channels,
+    COUNT(*)                                       AS total_onboarded
+FROM (
+    SELECT
+        s.store_id,
+        MAX(CASE WHEN ig.store_id IS NOT NULL THEN 1 ELSE 0 END) AS has_ipg,
+        MAX(CASE WHEN pm.store_id IS NOT NULL THEN 1 ELSE 0 END) AS has_pos
+    FROM webxpay_master.tbl_store s
+    LEFT JOIN (
+        SELECT DISTINCT store_id FROM webxpay_master.tbl_store_payment_gateway_2 WHERE is_active = 1
+    ) ig ON ig.store_id = s.store_id
+    LEFT JOIN (
+        SELECT DISTINCT store_id FROM webxpay_master.tbl_pos_store_bank_mid WHERE is_active = 1
+    ) pm ON pm.store_id = s.store_id
+    WHERE {date_filter}
+      AND s.free_trail = 0
+      AND s.is_active = 1
+      AND (ig.store_id IS NOT NULL OR pm.store_id IS NOT NULL)
+    GROUP BY s.store_id
+) x;
+""".strip()
+
     # Detect channel
     is_pos = "pos" in ql
     is_ipg = "ipg" in ql or (not is_pos)
@@ -3180,7 +3370,7 @@ ORDER BY onboard_date DESC;
     if is_pos and not is_ipg:
         channel_join = """
 JOIN (
-    SELECT DISTINCT store_id FROM webxpay_master.tbl_pos_store_bank_mid
+    SELECT DISTINCT store_id FROM webxpay_master.tbl_pos_store_bank_mid WHERE is_active = 1
 ) ch ON ch.store_id = s.store_id"""
     elif is_ipg and not is_pos:
         channel_join = """
@@ -3193,7 +3383,7 @@ JOIN (
 JOIN (
     SELECT DISTINCT store_id FROM webxpay_master.tbl_store_payment_gateway_2 WHERE is_active = 1
     UNION
-    SELECT DISTINCT store_id FROM webxpay_master.tbl_pos_store_bank_mid
+    SELECT DISTINCT store_id FROM webxpay_master.tbl_pos_store_bank_mid WHERE is_active = 1
 ) ch ON ch.store_id = s.store_id"""
 
     # Detect if user wants a list or just a count
@@ -3248,7 +3438,7 @@ def build_merchant_onboarding_timeseries_sql(question: str, ds: str, de: str, gr
     if is_pos and not is_ipg:
         channel_join = """
 JOIN (
-    SELECT DISTINCT store_id FROM webxpay_master.tbl_pos_store_bank_mid
+    SELECT DISTINCT store_id FROM webxpay_master.tbl_pos_store_bank_mid WHERE is_active = 1
 ) ch ON ch.store_id = s.store_id"""
     elif is_ipg and not is_pos:
         channel_join = """
@@ -3260,7 +3450,7 @@ JOIN (
 JOIN (
     SELECT DISTINCT store_id FROM webxpay_master.tbl_store_payment_gateway_2 WHERE is_active = 1
     UNION
-    SELECT DISTINCT store_id FROM webxpay_master.tbl_pos_store_bank_mid
+    SELECT DISTINCT store_id FROM webxpay_master.tbl_pos_store_bank_mid WHERE is_active = 1
 ) ch ON ch.store_id = s.store_id"""
 
     return f"""
@@ -3308,6 +3498,7 @@ LEFT JOIN (
 LEFT JOIN (
     SELECT DISTINCT store_id
     FROM webxpay_master.tbl_pos_store_bank_mid
+    WHERE is_active = 1
 ) pos ON s.store_id = pos.store_id
 WHERE {where_clause}
   AND s.free_trail = 0
@@ -3343,6 +3534,7 @@ LEFT JOIN (
 LEFT JOIN (
     SELECT DISTINCT store_id
     FROM webxpay_master.tbl_pos_store_bank_mid
+    WHERE is_active = 1
 ) pos ON s.store_id = pos.store_id
 WHERE {where_clause}
   AND s.free_trail = 0
@@ -3356,7 +3548,9 @@ ORDER BY merchant_count DESC;
 # ✅ ADD: POS time series SQL builder (day/week/month)
 def build_pos_timeseries_sql(ds: str, de: str, grain: str) -> str:
     if grain == "day":
-        bucket = "DATE(t.transaction_date)"
+        # ISO date string keeps chronological sort consistent with the IPG builder
+        # and the Python merge (raw DATE sorts alphabetically by weekday name).
+        bucket = "DATE_FORMAT(t.transaction_date, '%Y-%m-%d')"
         alias = "day"
     elif grain == "week":
         bucket = "DATE_FORMAT(DATE_SUB(t.transaction_date, INTERVAL WEEKDAY(t.transaction_date) DAY), '%Y-%m-%d')"
@@ -3383,16 +3577,14 @@ def build_pos_timeseries_sql(ds: str, de: str, grain: str) -> str:
 
     txn_norm = "LOWER(TRIM(COALESCE(t.txn_type,'')))"
 
-    # Revenue: adjusted_amount × (m.mdr_rate − m.cost_rate) / 100
-    # sale/amex=+amount, void=-amount; joined via tbl_pos_store_bank_mid on store_id+bank_merchant_mid.
-    adj_amt = f"""CASE
-            WHEN {txn_norm} IN ('sale','amex')                                   THEN  t.amount
-            WHEN {txn_norm} IN ('void_sale','void_amex','void-sale','void-amex') THEN -t.amount
-            ELSE 0
+    # Revenue: UNPAIRED sales only (same pair-key basis as GMV) × (t.mdr_rate − cost) / 100.
+    # MDR = transaction's OWN t.mdr_rate (always present); cost = deduped m.cost_rate, fallback 1.7.
+    # Voids and paired sales contribute NULL. This matches Power BI exactly.
+    row_rev = f"""CASE
+            WHEN {txn_norm} IN ('sale','amex') AND pk_as.pair_key IS NULL
+            THEN ROUND(t.amount * (COALESCE(t.mdr_rate, 0) - COALESCE(m.cost_rate, 1.7)) / 100.0, 2)
+            ELSE NULL
         END"""
-    row_rev = f"""ROUND(
-            ({adj_amt}) * (COALESCE(m.mdr_rate, 0) - COALESCE(m.cost_rate, 0)) / 100.0
-        , 2)"""
 
     return f"""
 SELECT
@@ -3459,10 +3651,14 @@ LEFT JOIN (
 ) pk_as
     ON  t.ipg_provider_id = pk_as.ipg_provider_id
     AND {pair_key_t} = pk_as.pair_key
-LEFT JOIN webxpay_master.tbl_pos_store_bank_mid m
+LEFT JOIN (
+    SELECT store_id, bank_merchant_mid, MAX(cost_rate) AS cost_rate
+    FROM webxpay_master.tbl_pos_store_bank_mid
+    WHERE cost_rate IS NOT NULL
+    GROUP BY store_id, bank_merchant_mid
+) m
     ON  m.store_id          = t.store_id
     AND m.bank_merchant_mid = t.bank_merchant_mid
-    AND m.is_active         = 1
 WHERE t.transaction_date >= '{ds}'
   AND t.transaction_date <  '{de}'
 GROUP BY {bucket}
@@ -3588,8 +3784,11 @@ def _merge_overview_timeseries_rows(timeseries: dict) -> list[dict]:
             row["combined_gmv_lkr"] = float(row.get("ipg_gmv_lkr") or 0) + float(row.get("pos_gmv_lkr") or 0)
         if "ipg_revenue_lkr" in row or "pos_total_revenue_lkr" in row:
             row["combined_revenue_lkr"] = float(row.get("ipg_revenue_lkr") or 0) + float(row.get("pos_total_revenue_lkr") or 0)
+        # combined_volume mirrors Power BI's total volume, which is POS (DFCC+HNB)
+        # only. IPG online volume is reported separately and intentionally NOT
+        # summed in here (verified vs BI: June-1 POS vol 5867 == BI total 5866).
         if "ipg_volume" in row or "pos_volume" in row:
-            row["combined_volume"] = int(row.get("ipg_volume") or 0) + int(row.get("pos_volume") or 0)
+            row["combined_volume"] = int(row.get("pos_volume") or 0)
         out.append(row)
 
     return out
@@ -3636,8 +3835,33 @@ def choose_grain_for_overview(question: str, ds: str, de: str) -> str | None:
 def handle_period_overview(question: str, sql_executor):
     ds, de = get_period_from_question(question)
 
+    # Cross-month comparison ("unusual in June vs other months", "compare months",
+    # "any anomalies this year") needs ALL months, not just the one named → widen to
+    # the full year and force a monthly breakdown so the answer can actually compare.
+    _ql_ov = question.lower()
+    _wants_month_compare = (
+        any(p in _ql_ov for p in [
+            "other months", "other month", "across months", "month over month",
+            "month-over-month", "month on month", "compared to other", "vs other",
+            "between months", "previous months", "prior months", "rest of the",
+        ])
+        or (any(w in _ql_ov for w in [
+                "unusual", "anomal", "stand out", "stands out", "stood out",
+                "spike", "spiked", "dip", "outlier", "compare", "compared", "vs ", "versus",
+            ]) and ("month" in _ql_ov or "june" in _ql_ov or "may" in _ql_ov
+                    or "april" in _ql_ov or "march" in _ql_ov))
+    )
+    if _wants_month_compare:
+        try:
+            _y = datetime.strptime(ds, "%Y-%m-%d").year
+        except Exception:
+            _y = datetime.now().year
+        ds, de = f"{_y}-01-01", f"{_y+1}-01-01"
+
     # ✅ detect if user requested daily/weekly/monthly breakdown
     grain = choose_grain_for_overview(question, ds, de)
+    if _wants_month_compare:
+        grain = "month"
 
 
     revenue_intent = {
@@ -4074,12 +4298,14 @@ GROUP BY o.store_id, s.doing_business_name
         ELSE NULL
     END) AS pos_volume"""
     elif metric_type == "revenue":
-        adj_amt = f"CASE WHEN {txn_norm} IN ('sale','amex') THEN t.amount WHEN {txn_norm} IN ('void_sale','void_amex','void-sale','void-amex') THEN -t.amount ELSE 0 END"
+        # UNPAIRED sales only (same pair-key basis as GMV) × (t.mdr_rate − cost)/100;
+        # cost = deduped m.cost_rate, fallback 1.7. Matches Power BI exactly.
         pos_select = f"""ROUND(SUM(CASE
         WHEN t.ipg_provider_id NOT IN (5, 6) THEN NULL
         WHEN t.currency <> 'LKR' OR t.amount IS NULL THEN NULL
-        WHEN {txn_norm} NOT IN ('sale','amex','void_sale','void_amex','void-sale','void-amex') THEN NULL
-        ELSE ({adj_amt}) * (COALESCE(m.mdr_rate, 0) - COALESCE(m.cost_rate, 0)) / 100.0
+        WHEN {txn_norm} IN ('sale','amex') AND pk_as.pair_key IS NULL
+            THEN t.amount * (COALESCE(t.mdr_rate, 0) - COALESCE(m.cost_rate, 1.7)) / 100.0
+        ELSE NULL
     END), 2) AS pos_total_revenue_lkr"""
     else:
         pos_select = f"""ROUND(SUM(CASE
@@ -4112,10 +4338,14 @@ LEFT JOIN (
 ) pk_as
     ON  t.ipg_provider_id = pk_as.ipg_provider_id
     AND {pair_key_t} = pk_as.pair_key
-LEFT JOIN webxpay_master.tbl_pos_store_bank_mid m
+LEFT JOIN (
+    SELECT store_id, bank_merchant_mid, MAX(cost_rate) AS cost_rate
+    FROM webxpay_master.tbl_pos_store_bank_mid
+    WHERE cost_rate IS NOT NULL
+    GROUP BY store_id, bank_merchant_mid
+) m
     ON  m.store_id          = t.store_id
     AND m.bank_merchant_mid = t.bank_merchant_mid
-    AND m.is_active         = 1
 JOIN webxpay_master.tbl_store s ON s.store_id = t.store_id
 WHERE t.ipg_provider_id IN (5, 6)
   AND t.currency = 'LKR'
@@ -4351,6 +4581,13 @@ def classify_question(question: str) -> dict:
         "yesterday", "today", "january", "february", "march", "april", "may",
         "june", "july", "august", "september", "october", "november", "december",
         "pos merchant", "ipg merchant", "show me", "give me", "list",
+        # Rate/pricing questions are DATA (tbl_payment_gateway has the rates) —
+        # "What is the Commercial LKR rate for Credit/Debit Cards?" must not be
+        # refused as general knowledge. Bank/provider names count as data intent too.
+        "rate", "emi", "token", "google pay", "gpay", "gateway", "provider",
+        "credit card", "debit card", "visa", "master", "amex",
+        "hnb", "dfcc", "seylan", "sampath", "commercial", "cargills", "ntb",
+        "nations trust", "lankapay", "frimi", "mintpay",
     ]
     _has_data_intent = any(d in ql for d in _data_intent)
 
@@ -4381,10 +4618,11 @@ WEBXPAY context:
 Question: {question}"""
         try:
             resp = client.chat.completions.create(
-                model="gpt-4.1-mini",
+                model=CHAT_MODEL,
                 messages=[{"role": "user", "content": knowledge_prompt}],
                 temperature=0.2,
-                max_tokens=400,
+                max_tokens=1000,
+                reasoning_effort="none",  # disable Gemini thinking (see generate_insights)
             )
             return {"type": "knowledge", "answer": resp.choices[0].message.content.strip()}
         except Exception:
@@ -4394,12 +4632,984 @@ Question: {question}"""
     return {"type": "data_query", "answer": None}
 
 
+_DIAG_MONTHS = {
+    'january': 1, 'february': 2, 'march': 3, 'april': 4, 'may': 5, 'june': 6,
+    'july': 7, 'august': 8, 'september': 9, 'october': 10, 'november': 11, 'december': 12,
+    'jan': 1, 'feb': 2, 'mar': 3, 'apr': 4, 'jun': 6, 'jul': 7, 'aug': 8,
+    'sep': 9, 'sept': 9, 'oct': 10, 'nov': 11, 'dec': 12,
+}
+
+
+def _parse_two_dates(question: str):
+    """Parse two comparable dates from a 'between A and B' style question.
+    Returns (date_a, date_b) as 'YYYY-MM-DD' (in question order), or None."""
+    ql = question.lower()
+    ym = re.search(r'\b(20\d{2})\b', ql)
+    year = int(ym.group(1)) if ym else datetime.now().year
+    month = None
+    for name, num in _DIAG_MONTHS.items():
+        if re.search(r'\b' + name + r'\b', ql):
+            month = num
+            break
+    if not month:
+        return None
+    days = None
+    # Path A: two days directly connected — "16th and 17th", "16 vs 17", "16 to 17",
+    # "11th ... than ... 12th" (note: 'than' connector for "better/more than").
+    dm = re.search(
+        r'\b(\d{1,2})(?:st|nd|rd|th)?\s*(?:and|vs\.?|versus|to|than|&|-)\s*(\d{1,2})(?:st|nd|rd|th)?\b',
+        ql,
+    )
+    if dm:
+        days = (int(dm.group(1)), int(dm.group(2)))
+    else:
+        # Path B: two day mentions anywhere in the question, even separated by a whole
+        # clause ("june 11th had a better gmv than june 12th"). Collect month-prefixed
+        # days ("june 11th") AND standalone ordinals ("11th"), in order of appearance.
+        # (?!\d) stops "june 2026" being read as day 20. Ordinal suffix is required for
+        # standalone numbers so we don't grab unrelated counts.
+        month_names = '|'.join(_DIAG_MONTHS.keys())
+        cands = []
+        for m in re.finditer(r'\b(?:' + month_names + r')\s+(\d{1,2})(?:st|nd|rd|th)?(?!\d)', ql):
+            cands.append((m.start(), int(m.group(1))))
+        for m in re.finditer(r'\b(\d{1,2})(?:st|nd|rd|th)\b', ql):
+            cands.append((m.start(), int(m.group(1))))
+        cands.sort(key=lambda x: x[0])
+        uniq = []
+        for _, d in cands:
+            if d not in uniq:
+                uniq.append(d)
+        if len(uniq) >= 2:
+            days = (uniq[0], uniq[1])
+    if not days:
+        return None
+    try:
+        a = datetime(year, month, days[0]).strftime('%Y-%m-%d')
+        b = datetime(year, month, days[1]).strftime('%Y-%m-%d')
+        return a, b
+    except ValueError:
+        return None
+
+
+def llm_extract_query_spec(question: str) -> dict:
+    """LLM-based structured extraction so routing does NOT depend on hardcoded
+    keywords/regex. The model resolves ANY phrasing ("did the 11th beat the next
+    day", "was Monday stronger than Tuesday", "Jun 11 vs the day after") into a
+    typed spec, resolving relative dates against today.
+
+    Returns {} on any failure so callers fall back to the legacy keyword path —
+    this never raises and never blocks a question from being answered.
+    """
+    today = datetime.now().date()
+    prompt = f"""Today is {today} (format YYYY-MM-DD). You extract a routing spec from a
+user's analytics question for a payment gateway. Resolve ALL dates (including relative
+ones like "the next day", "yesterday", "last Monday", weekday names) to YYYY-MM-DD
+against today. Output ONLY a JSON object, no prose, no code fences:
+
+{{
+  "two_date_comparison": <true if the question compares/contrasts exactly TWO specific
+                          days in either direction (better/worse/higher/drop/vs/than),
+                          else false>,
+  "dates": [<resolved "YYYY-MM-DD" dates in the order asked; [] if none>],
+  "wants_reason": <true if they ask why / for the cause or drivers, else false>
+}}
+
+Question: {question}
+JSON:"""
+    try:
+        resp = client.chat.completions.create(
+            model=CHAT_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0,
+            max_tokens=300,
+            reasoning_effort="none",
+        )
+        raw = (resp.choices[0].message.content or "").strip()
+        # Strip ```json ... ``` fences if the model added them.
+        raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw, flags=re.IGNORECASE).strip()
+        # Grab the first {...} block in case of stray text.
+        m = re.search(r"\{.*\}", raw, flags=re.DOTALL)
+        if m:
+            raw = m.group(0)
+        spec = json.loads(raw)
+        if not isinstance(spec, dict):
+            return {}
+        # Normalize/validate dates to YYYY-MM-DD.
+        clean_dates = []
+        for d in (spec.get("dates") or []):
+            if isinstance(d, str):
+                try:
+                    datetime.strptime(d.strip(), "%Y-%m-%d")
+                    clean_dates.append(d.strip())
+                except ValueError:
+                    continue
+        spec["dates"] = clean_dates
+        return spec
+    except Exception:
+        return {}
+
+
+def interpret_followup(question: str, history=None) -> dict:
+    """One LLM call that does TWO jobs using prior turns:
+
+    1. Decides whether the message is a DATA question (wants numbers from the DB) or a
+       META message (about the assistant / its previous answer / a correction or
+       clarification — "why didn't you find that before", "are you sure?", "that's
+       wrong", "what did you mean"). Meta messages must NOT be turned into SQL.
+    2. For DATA: rewrites it into a self-contained question resolving anaphora/elision
+       ("that merchant", "these two days", "and revenue?", "do the same for May").
+       For META: produces a short conversational answer grounded in the conversation.
+
+    Returns {"kind": "data"|"meta", "question": <standalone>, "answer": <str|None>}.
+    Falls back to {"kind":"data","question":<original>,"answer":None} on no-history or
+    any failure — never raises, never blocks a question from being answered.
+    """
+    fallback = {"kind": "data", "question": question, "answer": None}
+    if not history:
+        return fallback
+    try:
+        turns = []
+        for m in history[-6:]:
+            role = m.get("role") or "user"
+            content = (m.get("content") or "").strip()
+            if not content:
+                continue
+            turns.append(f"{'User' if role == 'user' else 'Assistant'}: {content[:1500]}")
+        if not turns:
+            return fallback
+        convo = "\n".join(turns)
+        today = datetime.now().date()
+        prompt = f"""Today is {today}. Below is a conversation between a user and a
+WEBXPAY payment-gateway analytics assistant, then the user's NEW message.
+
+Classify the NEW message and respond with ONLY a JSON object:
+
+{{
+  "kind": "data" | "meta",
+  "question": "<for kind=data: the NEW message rewritten as ONE fully self-contained
+               question, resolving pronouns/elisions ('that merchant','these two days',
+               'and revenue?','do the same for May') by carrying over the metric, dates,
+               channel and entities from the conversation. If already self-contained,
+               copy it verbatim. For kind=meta: copy the NEW message verbatim.>",
+  "answer": "<for kind=meta ONLY: a short, direct, honest reply grounded in the
+             conversation above. For kind=data: null.>"
+}}
+
+Definitions:
+- "data" = the user wants figures/records from the database (GMV, revenue, merchants,
+  dates, comparisons, breakdowns, etc.), even if phrased as a follow-up.
+- "meta" = the message is ABOUT the assistant or its previous answer rather than a new
+  data request: corrections, doubts, clarifications, or process questions like "why
+  didn't you find that before", "are you sure", "that's wrong", "what do you mean",
+  "explain your last answer". These must NOT trigger a database query.
+
+FUTURE / OPINION QUESTIONS ARE DATA, NOT META: predictions ("where will webxpay be in
+5 years"), market/industry-trend assessments ("are we up to date with current market
+trends"), and company-performance judgments ("are we doing well") are kind=data —
+dedicated downstream engines (outlook/advisor) answer them with real figures. NEVER
+reply "I cannot make predictions" or "I only provide data from our database".
+
+VAGUE COMMANDS ARE DATA, NOT META: "find it", "do it", "yes do that", "go ahead",
+"try again", "show me" = kind=data. Resolve the pronoun to the most recent CONCRETE
+data request in the conversation that was not yet fulfilled (skip apology/meta turns
+when looking for it). NEVER answer these with "I need more context" — always produce
+your best-guess standalone rewrite.
+
+MODIFIER FOLLOW-UPS keep the ORIGINAL question's subject AND period and change only
+what the user asked to change. Look back past any meta/apology turns to the last real
+data question. Example: earlier question "who had best approved sales in june" (an RM
+ranking for June 2026), new message "now find for ipg and pos both" ->
+"Which RM had the best approved sales in June 2026, combining both IPG and POS
+channels?" — NOT a generic channel total, and NOT a different period.
+
+SPELLING CORRECTIONS: when the user re-supplies or corrects a name ("pramoda",
+"the name is pramoda"), the rewritten question MUST use the user's LATEST spelling
+verbatim — NEVER carry forward an earlier variant from the conversation (a previous
+failure kept searching the old misspelling "Promada" after the user corrected it).
+
+VISUALIZATION REQUESTS ("present this as an infographic/chart/graph", "visualize it",
+"plot this") are kind=data, NOT meta: rewrite them as the SAME underlying data question
+(carrying its subject, filters and period) with "as a chart" appended — the UI renders an
+interactive chart automatically from any multi-row result. NEVER answer that the
+assistant "cannot generate visual infographics"; it can, via the UI's charts.
+
+RULES FOR meta ANSWERS (critical):
+- You ARE the analytics assistant with LIVE database access — every previous answer in
+  the conversation came from real SQL queries. NEVER claim you lack access to data,
+  and NEVER retract or disavow a previous answer unless the user demonstrated it was
+  actually wrong.
+- METHODOLOGY CLAIMS MUST COME FROM EVIDENCE: assistant turns may contain an
+  "[SQL used: ...]" tail and explanatory notes — that is the ONLY source of truth for
+  what a previous answer covered. tbl_order/tbl_payment = IPG (online);
+  tbl_pos_transactions = POS (card machines). If the SQL shows only tbl_order, the
+  answer was IPG-only — say exactly that. If neither the SQL nor the notes show the
+  detail asked about, say you'd need to re-run it to confirm — NEVER assert a
+  methodology detail (channel, filter, period) you cannot see in the conversation.
+- WHEN THE USER DISPUTES A DETAIL of the previous answer ("that was only ipg"): check
+  the [SQL used]/notes. If they support the user — or you cannot disprove it — accept
+  the user's statement plainly ("You're right — that ranking used IPG transactions
+  only") and offer the corrected query. NEVER argue back without evidence, and NEVER
+  repeat a claim the user just contested unless the SQL proves it.
+- "how did you analyze/find/calculate X" → explain the method visible in the
+  conversation (which metric, which period, what was ranked/summed), then RE-AFFIRM
+  the result. Do not apologize; nothing is wrong.
+- If the user points out a REAL mistake (e.g. describing an ongoing year as "to
+  December 31"), acknowledge that ONE specific mistake, state the corrected fact
+  (e.g. "the figures are 2026 year-to-date, through {today}"), and re-affirm what is
+  still valid (the ranking/numbers themselves). Never throw away the whole answer or
+  invent additional errors that were not made.
+- Keep it to 2–4 sentences, confident and factual.
+
+CONVERSATION:
+{convo}
+
+NEW MESSAGE: {question}
+
+JSON:"""
+        resp = client.chat.completions.create(
+            model=CHAT_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0,
+            max_tokens=400,
+            reasoning_effort="none",
+        )
+        raw = (resp.choices[0].message.content or "").strip()
+        raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw, flags=re.IGNORECASE).strip()
+        mm = re.search(r"\{.*\}", raw, flags=re.DOTALL)
+        if mm:
+            raw = mm.group(0)
+        spec = json.loads(raw)
+        if not isinstance(spec, dict):
+            return fallback
+        kind = "meta" if spec.get("kind") == "meta" else "data"
+        rewritten = (spec.get("question") or "").strip() or question
+        # Guard against junk rewrites → keep original.
+        if kind == "data" and len(rewritten) > 4 * len(question) + 200:
+            rewritten = question
+        answer = spec.get("answer")
+        if kind == "meta" and not (isinstance(answer, str) and answer.strip()):
+            # Meta but no usable answer → fall back to treating as data so the user
+            # still gets a response rather than silence.
+            return {"kind": "data", "question": question, "answer": None}
+        return {"kind": kind, "question": rewritten, "answer": answer}
+    except Exception:
+        return fallback
+
+
+def _store_id_key(value):
+    """Stable dict key for store IDs returned as int/Decimal/string by different drivers."""
+    if value is None:
+        return None
+    try:
+        return str(int(value))
+    except Exception:
+        return str(value).strip()
+
+
+def handle_gmv_drop_diagnosis(question: str, sql_executor, dates=None):
+    """Diagnose a GMV change between two dates by fetching EACH merchant's IPG+POS
+    GMV on both days and ranking the biggest movers. Numbers come straight from the
+    DB (no fabrication). Returns None if two dates can't be parsed.
+
+    `dates` may be passed in pre-resolved (e.g. from the LLM extractor) for any
+    phrasing; falls back to the regex parser when not provided."""
+    dates = dates or _parse_two_dates(question)
+    if not dates:
+        return None
+    da, db = dates
+    lo, hi = (da, db) if da <= db else (db, da)
+    span_end = (datetime.strptime(hi, '%Y-%m-%d') + timedelta(days=1)).strftime('%Y-%m-%d')
+
+    fx = """CASE
+        WHEN o.processing_currency_id = '5' THEN o.total_amount
+        WHEN o.exchange_rate IS NOT NULL AND o.exchange_rate NOT LIKE ''
+             AND o.exchange_rate REGEXP '^[0-9]+(\\.[0-9]+)?$' THEN o.total_amount * o.exchange_rate
+        ELSE o.total_amount * (
+            SELECT er.buying_rate FROM webxpay_master.tbl_exchange_rate er
+            WHERE er.currency_id = o.processing_currency_id AND er.date <= DATE(p.date_time_transaction)
+            ORDER BY er.date DESC LIMIT 1)
+    END"""
+    ipg_sql = f"""
+SELECT o.store_id AS store_id, DATE(p.date_time_transaction) AS d, ROUND(SUM({fx}), 2) AS gmv
+FROM webxpay_master.tbl_order o
+JOIN webxpay_master.tbl_payment p ON p.payment_id = o.payment_id
+WHERE o.payment_status_id = 2 AND o.processing_currency_id IN ('5','2')
+  AND p.date_time_transaction >= '{lo}' AND p.date_time_transaction < '{span_end}'
+GROUP BY o.store_id, DATE(p.date_time_transaction)""".strip()
+
+    pk_inner = ("CONCAT(COALESCE(TRIM(CAST(invoice_no AS CHAR)),''),'|',"
+                "COALESCE(TRIM(CAST(auth_code AS CHAR)),''),'|',COALESCE(TRIM(rrn),''),'|',"
+                "COALESCE(TRIM(CAST(terminal_id AS CHAR)),''),'|',COALESCE(TRIM(CAST(terminal_sn AS CHAR)),''))")
+    pk_t = ("CONCAT(COALESCE(TRIM(CAST(t.invoice_no AS CHAR)),''),'|',"
+            "COALESCE(TRIM(CAST(t.auth_code AS CHAR)),''),'|',COALESCE(TRIM(t.rrn),''),'|',"
+            "COALESCE(TRIM(CAST(t.terminal_id AS CHAR)),''),'|',COALESCE(TRIM(CAST(t.terminal_sn AS CHAR)),''))")
+    pos_sql = f"""
+SELECT t.store_id AS store_id, DATE(t.transaction_date) AS d,
+  SUM(CASE
+    WHEN t.ipg_provider_id NOT IN (5,6) THEN NULL
+    WHEN t.currency <> 'LKR' OR t.amount IS NULL THEN NULL
+    WHEN pk_as.pair_key IS NOT NULL THEN NULL
+    WHEN LOWER(TRIM(COALESCE(t.txn_type,''))) IN ('sale','amex') THEN t.amount
+    ELSE NULL END) AS gmv
+FROM webxpay_master.tbl_pos_transactions t
+LEFT JOIN (
+    SELECT ipg_provider_id, {pk_inner} AS pair_key
+    FROM webxpay_master.tbl_pos_transactions
+    WHERE ipg_provider_id IN (5,6) AND transaction_date >= '{lo}' AND transaction_date < '{span_end}'
+    GROUP BY ipg_provider_id, {pk_inner}
+    HAVING SUM(CASE WHEN LOWER(TRIM(COALESCE(txn_type,''))) IN ('sale','amex') THEN 1 ELSE 0 END) > 0
+       AND SUM(CASE WHEN LOWER(TRIM(COALESCE(txn_type,''))) IN ('','void_sale','void_amex','void-sale','void-amex') THEN 1 ELSE 0 END) > 0
+) pk_as ON t.ipg_provider_id = pk_as.ipg_provider_id AND {pk_t} = pk_as.pair_key
+WHERE t.ipg_provider_id IN (5,6) AND t.currency = 'LKR'
+  AND t.transaction_date >= '{lo}' AND t.transaction_date < '{span_end}'
+GROUP BY t.store_id, DATE(t.transaction_date)""".strip()
+
+    ipg = sql_executor(ipg_sql)
+    pos = sql_executor(pos_sql)
+    for res in (ipg, pos):
+        if isinstance(res, dict) and res.get("error"):
+            return {"question": question, "sql": {"ipg": ipg_sql, "pos": pos_sql},
+                    "raw_result": res, "answer": "", "insights": "",
+                    "response_type": "data_query"}
+
+    # Aggregate per store: gmv on lo-day and hi-day (IPG + POS combined).
+    agg = {}
+    for src in (ipg, pos):
+        for row in (src if isinstance(src, list) else []):
+            s = row.get("store_id")
+            d = str(row.get("d"))
+            g = float(row.get("gmv") or 0)
+            slot = agg.setdefault(s, {lo: 0.0, hi: 0.0})
+            if d == lo:
+                slot[lo] += g
+            elif d == hi:
+                slot[hi] += g
+
+    # Merchant/RM names for the involved stores.
+    names, rms = {}, {}
+    ids = sorted(
+        {_store_id_key(s) for s in agg.keys() if _store_id_key(s) is not None},
+        key=lambda x: int(x) if x.isdigit() else x,
+    )
+    if ids:
+        nm = sql_executor(
+            "SELECT s.store_id, s.doing_business_name "
+            "FROM webxpay_master.tbl_store s "
+            f"WHERE s.store_id IN ({','.join(ids)})"
+        )
+        for r in (nm if isinstance(nm, list) else []):
+            names[_store_id_key(r.get("store_id"))] = r.get("doing_business_name")
+
+        # RM name via THREE fallbacks (first non-empty wins), so fewer stores show blank:
+        #   1) signup chain:  wbx_merchant_signups.live_rm_id -> wbx_live_rms -> wbx_admin_users
+        #   2) direct link:   wbx_live_rms.merchant_id = store_id -> wbx_admin_users
+        #   3) denormalised:  tbl_store.signup_rm_name
+        rm = sql_executor(_rm_map_sql(f"s.store_id IN ({','.join(ids)})"))
+        if isinstance(rm, dict) and "error" in rm:
+            print("[RM lookup ERROR]", rm.get("error"))   # e.g. unknown column / access denied
+        for r in (rm if isinstance(rm, list) else []):
+            rms[_store_id_key(r.get("store_id"))] = r.get("rm_name")
+        _n_rm = sum(1 for v in rms.values() if v)
+        print(f"[RM diag] stores={len(ids)}  got_rm_name={_n_rm}  (chain via wbx_merchants)")
+
+    rows = []
+    for s, dd in agg.items():
+        ga, gb = round(dd[lo], 2), round(dd[hi], 2)
+        sk = _store_id_key(s)
+        rows.append({
+            "merchant_name": names.get(sk, str(s)), "store_id": s,
+            "rm_name": rms.get(sk),
+            f"gmv_{lo}": ga, f"gmv_{hi}": gb, "change_lkr": round(gb - ga, 2),
+        })
+    rows.sort(key=lambda r: r["change_lkr"])  # biggest drops first
+
+    tot_a = round(sum(dd[lo] for dd in agg.values()), 2)
+    tot_b = round(sum(dd[hi] for dd in agg.values()), 2)
+    summary = {"merchant_name": f"— ALL MERCHANTS (combined IPG+POS GMV) —", "store_id": None,
+               "rm_name": "ALL RMS",
+               f"gmv_{lo}": tot_a, f"gmv_{hi}": tot_b, "change_lkr": round(tot_b - tot_a, 2)}
+    out_rows = [summary] + rows[:25]
+
+    insights = generate_insights(question, out_rows)
+    return {"question": question, "sql": {"ipg": ipg_sql, "pos": pos_sql},
+            "raw_result": out_rows, "answer": insights, "insights": insights,
+            "response_type": "data_query"}
+
+
+def _parse_two_months(question: str):
+    """Parse two MONTH-level periods from a 'compare June and May 2026' style question.
+    Returns ((year_a, month_a), (year_b, month_b)) in question order, or None.
+
+    Returns None when specific day-of-month numbers are tied to the question (e.g.
+    "june 11th vs 12th") — those are single-day comparisons handled by
+    handle_gmv_drop_diagnosis, not month comparisons."""
+    ql = question.lower()
+    # Day-of-month ordinals present → this is a day comparison, not a month one.
+    if re.search(r'\b\d{1,2}(?:st|nd|rd|th)\b', ql):
+        return None
+
+    month_re = (r'\b(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|'
+                r'jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|'
+                r'nov(?:ember)?|dec(?:ember)?)\b')
+    months_in_order = []
+    for m in re.finditer(month_re, ql):
+        tok = m.group(1)
+        num = MONTHS.get(tok) or MONTHS.get(tok[:3])
+        if num:
+            months_in_order.append((m.start(), num))
+    # Need at least two DISTINCT months mentioned.
+    distinct = []
+    for pos, num in months_in_order:
+        if num not in [n for _, n in distinct]:
+            distinct.append((pos, num))
+    if len(distinct) < 2:
+        return None
+
+    years = [(m.start(), int(m.group(1))) for m in re.finditer(r'\b(20\d{2})\b', ql)]
+
+    def year_for(pos):
+        if not years:
+            return datetime.now().year
+        return min(years, key=lambda yp: abs(yp[0] - pos))[1]
+
+    (p1, m1), (p2, m2) = distinct[0], distinct[1]
+    return (year_for(p1), m1), (year_for(p2), m2)
+
+
+def _strip_code_fences(text: str) -> str:
+    """Remove fenced code blocks (```...```), incl. mermaid/ascii 'charts', from LLM
+    insight text. We render real charts ourselves, so these blocks only show as broken
+    text in the UI."""
+    if not isinstance(text, str):
+        return text
+    # Closed fences first, then any dangling/unterminated fence (LLM output cut off by
+    # the token limit leaves an opening ``` with no closing one — strip to end).
+    cleaned = re.sub(r"```.*?```", "", text, flags=re.DOTALL)
+    cleaned = re.sub(r"```.*$", "", cleaned, flags=re.DOTALL)
+    # Drop stray mermaid/diagram intros that sometimes appear without a fence.
+    cleaned = re.sub(r"(?im)^\s*(?:```)?\s*(?:mermaid|graph\s+TD|flowchart|sequenceDiagram)\b.*$", "", cleaned)
+    return re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+
+
+def handle_month_gmv_comparison(question: str, sql_executor, months=None):
+    """Compare each merchant's FULL-MONTH IPG+POS GMV between two months and surface
+    merchants who stopped transacting or dropped sharply (default: kept < 10% of the
+    earlier month). Numbers come straight from the DB (no fabrication).
+
+    Returns None if two months can't be parsed.
+
+    The earlier month (chronologically) is the baseline; the later month is measured
+    against it, so "compare June and May 2026" finds merchants whose June GMV is 0 or
+    below 10% of their May GMV."""
+    months = months or _parse_two_months(question)
+    if not months:
+        return None
+    a_key, b_key = months
+    (ey, em), (ly, lm) = (a_key, b_key) if a_key <= b_key else (b_key, a_key)
+    e_start, e_end = month_range(ey, em)   # earlier month (baseline)
+    l_start, l_end = month_range(ly, lm)   # later month (measured)
+    e_lbl = f"{ey}-{em:02d}"
+    l_lbl = f"{ly}-{lm:02d}"
+
+    # ── Decide the filter: DROP-direction vs RETENTION ──────────────────────────
+    # Two different intents share the same "X%" number, so we must read direction:
+    #   "transacted/kept LESS THAN X%"  → retention < X%   → later < (X/100)·base
+    #   "DROPPED/declined MORE THAN X%" → drop > X%         → later < (1−X/100)·base
+    #   "dropped" with no %             → any decline       → later < base
+    # Merchants are kept when  later < cutoff_ratio · base  (base = earlier-month GMV).
+    ql_q = question.lower()
+    mpct = re.search(r'(\d+(?:\.\d+)?)\s*%', ql_q)
+    pct = None
+    if mpct:
+        try:
+            pct = float(mpct.group(1)) / 100.0
+        except ValueError:
+            pct = None
+
+    _drop_words = ("drop", "declin", "fell", "fall", "decreas", "reduc", "lost", "down ", "shrunk", "shrank")
+    is_drop = any(w in ql_q for w in _drop_words)
+
+    # Direction of the % bound matters: "dropped LESS than 10%" (mild decline, a band)
+    # is the OPPOSITE of "dropped MORE than 10%" (sharp decline). Read the words
+    # immediately before the % number.
+    _pct_is_less = bool(re.search(
+        r"(?:less than|under|below|at most|no more than|not more than|<)\s*\d+(?:\.\d+)?\s*%", ql_q))
+
+    floor_ratio = None  # when set, keep only merchants with later >= floor_ratio · base
+    if is_drop:
+        if pct is not None and _pct_is_less:
+            cutoff_ratio = 1.0                         # declined at all...
+            floor_ratio = 1.0 - pct                    # ...but kept >= (1−X) of baseline
+            filter_desc = f"dropped < {pct * 100:g}% (mild decline)"
+        elif pct is not None:
+            cutoff_ratio = 1.0 - pct                  # "dropped more than X%"
+            filter_desc = f"dropped > {pct * 100:g}%"
+        else:
+            cutoff_ratio = 1.0                         # any decline
+            filter_desc = "any decline"
+    else:
+        cutoff_ratio = pct if pct is not None else 0.10  # "kept less than X%" (default 10%)
+        filter_desc = f"kept < {cutoff_ratio * 100:g}% (incl. zero)"
+    # Guard against nonsensical ratios (e.g. "dropped more than 150%").
+    cutoff_ratio = max(0.0, min(cutoff_ratio, 1.0))
+    if floor_ratio is not None:
+        floor_ratio = max(0.0, min(floor_ratio, 1.0))
+
+    fx = """CASE
+        WHEN o.processing_currency_id = '5' THEN o.total_amount
+        WHEN o.exchange_rate IS NOT NULL AND o.exchange_rate NOT LIKE ''
+             AND o.exchange_rate REGEXP '^[0-9]+(\\.[0-9]+)?$' THEN o.total_amount * o.exchange_rate
+        ELSE o.total_amount * (
+            SELECT er.buying_rate FROM webxpay_master.tbl_exchange_rate er
+            WHERE er.currency_id = o.processing_currency_id AND er.date <= DATE(p.date_time_transaction)
+            ORDER BY er.date DESC LIMIT 1)
+    END"""
+    ipg_window = (f"((p.date_time_transaction >= '{e_start}' AND p.date_time_transaction < '{e_end}') "
+                  f"OR (p.date_time_transaction >= '{l_start}' AND p.date_time_transaction < '{l_end}'))")
+    ipg_sql = f"""
+SELECT o.store_id AS store_id, DATE_FORMAT(p.date_time_transaction, '%Y-%m') AS ym, ROUND(SUM({fx}), 2) AS gmv
+FROM webxpay_master.tbl_order o
+JOIN webxpay_master.tbl_payment p ON p.payment_id = o.payment_id
+WHERE o.payment_status_id = 2 AND o.processing_currency_id IN ('5','2')
+  AND {ipg_window}
+GROUP BY o.store_id, DATE_FORMAT(p.date_time_transaction, '%Y-%m')""".strip()
+
+    pk_inner = ("CONCAT(COALESCE(TRIM(CAST(invoice_no AS CHAR)),''),'|',"
+                "COALESCE(TRIM(CAST(auth_code AS CHAR)),''),'|',COALESCE(TRIM(rrn),''),'|',"
+                "COALESCE(TRIM(CAST(terminal_id AS CHAR)),''),'|',COALESCE(TRIM(CAST(terminal_sn AS CHAR)),''))")
+    pk_t = ("CONCAT(COALESCE(TRIM(CAST(t.invoice_no AS CHAR)),''),'|',"
+            "COALESCE(TRIM(CAST(t.auth_code AS CHAR)),''),'|',COALESCE(TRIM(t.rrn),''),'|',"
+            "COALESCE(TRIM(CAST(t.terminal_id AS CHAR)),''),'|',COALESCE(TRIM(CAST(t.terminal_sn AS CHAR)),''))")
+    pos_window_inner = (f"((transaction_date >= '{e_start}' AND transaction_date < '{e_end}') "
+                        f"OR (transaction_date >= '{l_start}' AND transaction_date < '{l_end}'))")
+    pos_window_t = (f"((t.transaction_date >= '{e_start}' AND t.transaction_date < '{e_end}') "
+                    f"OR (t.transaction_date >= '{l_start}' AND t.transaction_date < '{l_end}'))")
+    pos_sql = f"""
+SELECT t.store_id AS store_id, DATE_FORMAT(t.transaction_date, '%Y-%m') AS ym,
+  SUM(CASE
+    WHEN t.ipg_provider_id NOT IN (5,6) THEN NULL
+    WHEN t.currency <> 'LKR' OR t.amount IS NULL THEN NULL
+    WHEN pk_as.pair_key IS NOT NULL THEN NULL
+    WHEN LOWER(TRIM(COALESCE(t.txn_type,''))) IN ('sale','amex') THEN t.amount
+    ELSE NULL END) AS gmv
+FROM webxpay_master.tbl_pos_transactions t
+LEFT JOIN (
+    SELECT ipg_provider_id, {pk_inner} AS pair_key
+    FROM webxpay_master.tbl_pos_transactions
+    WHERE ipg_provider_id IN (5,6) AND {pos_window_inner}
+    GROUP BY ipg_provider_id, {pk_inner}
+    HAVING SUM(CASE WHEN LOWER(TRIM(COALESCE(txn_type,''))) IN ('sale','amex') THEN 1 ELSE 0 END) > 0
+       AND SUM(CASE WHEN LOWER(TRIM(COALESCE(txn_type,''))) IN ('','void_sale','void_amex','void-sale','void-amex') THEN 1 ELSE 0 END) > 0
+) pk_as ON t.ipg_provider_id = pk_as.ipg_provider_id AND {pk_t} = pk_as.pair_key
+WHERE t.ipg_provider_id IN (5,6) AND t.currency = 'LKR'
+  AND {pos_window_t}
+GROUP BY t.store_id, DATE_FORMAT(t.transaction_date, '%Y-%m')""".strip()
+
+    ipg = sql_executor(ipg_sql)
+    pos = sql_executor(pos_sql)
+    for res in (ipg, pos):
+        if isinstance(res, dict) and res.get("error"):
+            return {"question": question, "sql": {"ipg": ipg_sql, "pos": pos_sql},
+                    "raw_result": res, "answer": "", "insights": "",
+                    "response_type": "data_query"}
+
+    # Aggregate per store and PER CHANNEL: full-month GMV for earlier & later month.
+    # Each store gets ipg/pos kept separate so we can report combined AND per-channel.
+    def _new_slot():
+        return {"ipg_e": 0.0, "ipg_l": 0.0, "pos_e": 0.0, "pos_l": 0.0}
+
+    agg = {}
+    for src, ch in ((ipg, "ipg"), (pos, "pos")):
+        for row in (src if isinstance(src, list) else []):
+            s = row.get("store_id")
+            ym = str(row.get("ym"))
+            g = float(row.get("gmv") or 0)
+            slot = agg.setdefault(s, _new_slot())
+            if ym == e_lbl:
+                slot[f"{ch}_e"] += g
+            elif ym == l_lbl:
+                slot[f"{ch}_l"] += g
+
+    # Keep merchants who had a COMBINED baseline in the earlier month and whose later
+    # month fell below the cutoff (this includes "didn't transact at all" = 0 later GMV).
+    matched = {}
+    for s, dd in agg.items():
+        base = dd["ipg_e"] + dd["pos_e"]
+        later = dd["ipg_l"] + dd["pos_l"]
+        if (base > 0 and later < cutoff_ratio * base
+                and (floor_ratio is None or later >= floor_ratio * base)):
+            matched[s] = dd
+
+    # Merchant names + MCC category (tbl_store.category_code_id → tbl_category_code).
+    names, cats, rms = {}, {}, {}
+    ids = sorted(
+        {_store_id_key(s) for s in matched.keys() if _store_id_key(s) is not None},
+        key=lambda x: int(x) if x.isdigit() else x,
+    )
+    if ids:
+        nm = sql_executor(
+            "SELECT s.store_id, s.doing_business_name, cc.description AS mcc "
+            "FROM webxpay_master.tbl_store s "
+            "LEFT JOIN webxpay_master.tbl_category_code cc ON cc.category_code_id = s.category_code_id "
+            f"WHERE s.store_id IN ({','.join(ids)})"
+        )
+        for r in (nm if isinstance(nm, list) else []):
+            sk = _store_id_key(r.get("store_id"))
+            names[sk] = r.get("doing_business_name")
+            cats[sk] = (r.get("mcc") or "").strip() or "Uncategorized"
+
+        # RM name via THREE fallbacks (first non-empty wins), so fewer stores show blank:
+        #   1) signup chain:  wbx_merchant_signups.live_rm_id -> wbx_live_rms -> wbx_admin_users
+        #   2) direct link:   wbx_live_rms.merchant_id = store_id -> wbx_admin_users
+        #   3) denormalised:  tbl_store.signup_rm_name
+        rm = sql_executor(_rm_map_sql(f"s.store_id IN ({','.join(ids)})"))
+        if isinstance(rm, dict) and "error" in rm:
+            print("[RM lookup ERROR]", rm.get("error"))   # e.g. unknown column / access denied
+        for r in (rm if isinstance(rm, list) else []):
+            rms[_store_id_key(r.get("store_id"))] = r.get("rm_name")
+        _n_rm = sum(1 for v in rms.values() if v)
+        print(f"[RM diag] stores={len(ids)}  got_rm_name={_n_rm}  (chain via wbx_merchants)")
+
+    rows = []
+    for s, dd in matched.items():
+        ie, il = round(dd["ipg_e"], 2), round(dd["ipg_l"], 2)
+        pe, pl = round(dd["pos_e"], 2), round(dd["pos_l"], 2)
+        ca, cb = round(ie + pe, 2), round(il + pl, 2)
+        pct = round((cb / ca) * 100, 1) if ca else None
+        sk = _store_id_key(s)
+        rows.append({
+            "merchant_name": names.get(sk, str(s)), "mcc": cats.get(sk, "Uncategorized"),
+            "store_id": s, "rm_name": rms.get(sk),
+            f"combined_{e_lbl}": ca, f"combined_{l_lbl}": cb,
+            "change_lkr": round(cb - ca, 2), "pct_of_prev": pct,
+            f"ipg_{e_lbl}": ie, f"ipg_{l_lbl}": il,
+            f"pos_{e_lbl}": pe, f"pos_{l_lbl}": pl,
+        })
+    rows.sort(key=lambda r: r["change_lkr"])  # biggest drops first
+
+    # MCC category rollup: combined/IPG/POS GMV per category for the matched merchants.
+    cat_agg = {}
+    for s, dd in matched.items():
+        mcc = cats.get(_store_id_key(s), "Uncategorized")
+        c = cat_agg.setdefault(mcc, {"ie": 0.0, "il": 0.0, "pe": 0.0, "pl": 0.0, "n": 0})
+        c["ie"] += dd["ipg_e"]; c["il"] += dd["ipg_l"]
+        c["pe"] += dd["pos_e"]; c["pl"] += dd["pos_l"]; c["n"] += 1
+
+    n_matched = len(rows)
+    tot_ie = round(sum(dd["ipg_e"] for dd in matched.values()), 2)
+    tot_il = round(sum(dd["ipg_l"] for dd in matched.values()), 2)
+    tot_pe = round(sum(dd["pos_e"] for dd in matched.values()), 2)
+    tot_pl = round(sum(dd["pos_l"] for dd in matched.values()), 2)
+    tot_ce, tot_cl = round(tot_ie + tot_pe, 2), round(tot_il + tot_pl, 2)
+    summary = {
+        "merchant_name": f"— {n_matched} MERCHANTS ({filter_desc}) {e_lbl} → {l_lbl} —",
+        "mcc": "ALL CATEGORIES",
+        "store_id": None,
+        "rm_name": "ALL RMS",
+        f"combined_{e_lbl}": tot_ce, f"combined_{l_lbl}": tot_cl,
+        "change_lkr": round(tot_cl - tot_ce, 2), "pct_of_prev": None,
+        f"ipg_{e_lbl}": tot_ie, f"ipg_{l_lbl}": tot_il,
+        f"pos_{e_lbl}": tot_pe, f"pos_{l_lbl}": tot_pl,
+    }
+    out_rows = [summary] + rows  # full list (no display cap)
+
+    # Build the per-MCC rollup rows (combined + IPG + POS, biggest combined drop first).
+    cat_rows = []
+    for mcc, c in cat_agg.items():
+        ce, cl = round(c["ie"] + c["pe"], 2), round(c["il"] + c["pl"], 2)
+        cat_rows.append({
+            "mcc": mcc, "merchants": c["n"],
+            f"combined_{e_lbl}": ce, f"combined_{l_lbl}": cl,
+            "change_lkr": round(cl - ce, 2),
+            "pct_of_prev": round((cl / ce) * 100, 1) if ce else None,
+            f"ipg_{e_lbl}": round(c["ie"], 2), f"ipg_{l_lbl}": round(c["il"], 2),
+            f"pos_{e_lbl}": round(c["pe"], 2), f"pos_{l_lbl}": round(c["pl"], 2),
+        })
+    cat_rows.sort(key=lambda r: r["change_lkr"])  # biggest combined drop first
+
+    # Chart spec for the frontend: decline categorized by MCC, split IPG vs POS
+    # (horizontal stacked bars, biggest combined drop first).
+    top_cats = cat_rows[:15]
+    chart = None
+    if top_cats:
+        chart = {
+            "type": "bar",
+            "orientation": "horizontal",
+            "stacked": True,
+            "title": f"Decline by MCC ({e_lbl}→{l_lbl}) — IPG vs POS, merchants that {filter_desc}",
+            "labels": [str(r["mcc"])[:32] for r in top_cats],
+            "datasets": [
+                {"label": "IPG decline",
+                 "data": [round((r[f"ipg_{e_lbl}"] or 0) - (r[f"ipg_{l_lbl}"] or 0), 2) for r in top_cats]},
+                {"label": "POS decline",
+                 "data": [round((r[f"pos_{e_lbl}"] or 0) - (r[f"pos_{l_lbl}"] or 0), 2) for r in top_cats]},
+            ],
+        }
+
+    # Generate insights from the MERCHANT rows only — never pass the summary row in, or
+    # the model mistakes the aggregate for a single merchant ("the merchant with the
+    # largest drop was — 496 MERCHANTS —"). The aggregate is supplied as labeled context
+    # so it can still be cited correctly as a group total.
+    _cat_brief = "; ".join(
+        f"{r['mcc']}: Rs {r[f'combined_{e_lbl}']:,.0f}→Rs {r[f'combined_{l_lbl}']:,.0f} "
+        f"({r['merchants']} merchants)"
+        for r in cat_rows[:8]
+    )
+    agg_context = (
+        f" [AGGREGATE CONTEXT — this is a GROUP TOTAL across all {n_matched} merchants "
+        f"that {filter_desc}, NOT a single merchant: combined GMV fell from "
+        f"Rs {tot_ce:,.2f} in {e_lbl} to Rs {tot_cl:,.2f} in {l_lbl} "
+        f"(total decline Rs {tot_ce - tot_cl:,.2f}); IPG Rs {tot_ie:,.2f} → Rs {tot_il:,.2f}; "
+        f"POS Rs {tot_pe:,.2f} → Rs {tot_pl:,.2f}. Refer to this only as the overall total "
+        f"or as '{n_matched} merchants', never as one merchant."
+        f" TOP MCC CATEGORIES BY DROP ({e_lbl}→{l_lbl}): {_cat_brief}. "
+        f"Mention which MCC categories drove the decline.]"
+    )
+    insights = _strip_code_fences(generate_insights(question + agg_context, rows))
+    return {"question": question,
+            "sql": {"ipg": ipg_sql, "pos": pos_sql,
+                    "rm_from_merchant_db": _rm_map_sql(f"s.store_id IN ({','.join(ids)})") if ids else None},
+            "raw_result": out_rows, "answer": insights, "insights": insights,
+            "chart": chart, "response_type": "data_query"}
+
+
+def _rm_map_sql(where_clause: str) -> str:
+    """RM-name resolver via the CORRECT chain (through wbx_merchants bridge):
+        tbl_store.store_id            = wbx_merchants.merchant_id
+        wbx_merchants.id              = wbx_merchant_signups.merchant_id
+        wbx_merchant_signups.live_rm_id -> wbx_live_rms.id
+        wbx_live_rms.admin_user_id    -> wbx_admin_users.id
+        wbx_admin_users.name          = RM name
+    `where_clause` filters tbl_store (e.g. "s.store_id IN (1,2,3)")."""
+    return f"""
+SELECT s.store_id AS store_id, rm_a.rm_name AS rm_name
+FROM webxpay_master.tbl_store s
+LEFT JOIN (
+    SELECT wm.merchant_id AS sid,
+           GROUP_CONCAT(DISTINCT au.name ORDER BY au.name SEPARATOR ', ') AS rm_name
+    FROM merchant_db.wbx_merchants        wm
+    JOIN merchant_db.wbx_merchant_signups ms ON ms.merchant_id = wm.id
+    JOIN merchant_db.wbx_live_rms         lr ON lr.id = ms.live_rm_id
+    JOIN merchant_db.wbx_admin_users      au ON au.id = lr.admin_user_id
+    GROUP BY wm.merchant_id
+) rm_a ON rm_a.sid = s.store_id
+WHERE {where_clause}
+""".strip()
+
+
+def build_store_rm_sql(question: str = "") -> str:
+    """Store name + Relationship Manager (RM) name, using merchant_db.wbx_merchant_signups
+    as the bridge to webxpay_master.tbl_store and the merchant_db RM chain:
+        wbx_merchant_signups.merchant_id -> tbl_store.store_id
+        wbx_merchant_signups.live_rm_id -> wbx_live_rms.id
+        wbx_live_rms.admin_user_id -> wbx_admin_users.id  (au.name = RM name)
+    Optional store-name filter if the question quotes/names a merchant.
+    """
+    where = "s.is_active = 1"
+    # crude name filter: "... for <Name>" / "rm of <Name>"
+    m = re.search(r"(?:for|of|store|merchant)\s+([A-Za-z0-9 &._-]{4,})$", question.strip(), re.I)
+    if m:
+        nm = m.group(1).strip().replace("'", "''")
+        if nm.lower() not in ("the store", "each store", "all stores", "merchants", "stores"):
+            where = f"s.doing_business_name LIKE '%{nm}%'"
+    # Correct chain: tbl_store -> wbx_merchants -> wbx_merchant_signups -> wbx_live_rms -> wbx_admin_users
+    return f"""
+SELECT
+    s.store_id            AS store_id,
+    s.doing_business_name AS store_name,
+    rm_signup.rm_name     AS rm_name
+FROM webxpay_master.tbl_store s
+LEFT JOIN (
+    SELECT wm.merchant_id AS sid,
+           GROUP_CONCAT(DISTINCT au.name ORDER BY au.name SEPARATOR ', ') AS rm_name
+    FROM merchant_db.wbx_merchants        wm
+    JOIN merchant_db.wbx_merchant_signups ms ON ms.merchant_id = wm.id
+    JOIN merchant_db.wbx_live_rms         lr ON lr.id = ms.live_rm_id
+    JOIN merchant_db.wbx_admin_users      au ON au.id = lr.admin_user_id
+    GROUP BY wm.merchant_id
+) rm_signup ON rm_signup.sid = s.store_id
+WHERE {where}
+ORDER BY s.doing_business_name
+LIMIT 1000;
+""".strip()
+
+
+def build_ipg_gmv_trend_sql(ds: str, de: str, grain: str = "month") -> str:
+    """Lean IPG GMV trend: EXACT validated GMV formula + volume only. Drops the
+    revenue/MDR columns and the opg join (those triple the per-row exchange-rate work and
+    cause timeouts). Same GMV numbers as build_ipg_timeseries_sql."""
+    fmt = {"day": "%Y-%m-%d", "week": "%x-W%v", "month": "%Y-%m"}.get(grain, "%Y-%m")
+    label = {"day": "day", "week": "year_week", "month": "year_month"}.get(grain, "year_month")
+    gmv_expr = """
+        CASE
+          WHEN o.processing_currency_id = '5' THEN o.total_amount
+          WHEN o.exchange_rate IS NOT NULL AND o.exchange_rate NOT LIKE ''
+               AND o.exchange_rate REGEXP '^[0-9]+(\\.[0-9]+)?$'
+               THEN o.total_amount * o.exchange_rate
+          ELSE o.total_amount * (
+            SELECT er.buying_rate FROM webxpay_master.tbl_exchange_rate er
+            WHERE er.currency_id = o.processing_currency_id
+              AND er.date <= DATE(p.date_time_transaction)
+            ORDER BY er.date DESC LIMIT 1)
+        END""".strip()
+    return f"""
+SELECT
+  DATE_FORMAT(p.date_time_transaction, '{fmt}') AS `{label}`,
+  ROUND(SUM(CASE WHEN o.payment_status_id = 2 AND o.processing_currency_id IN ('5','2')
+                 THEN {gmv_expr} ELSE 0 END), 2) AS `ipg_gmv_lkr`,
+  SUM(CASE WHEN o.payment_status_id = 2 THEN 1 ELSE 0 END) AS `ipg_volume`
+FROM webxpay_master.tbl_order o
+JOIN webxpay_master.tbl_payment p ON p.payment_id = o.payment_id
+WHERE p.date_time_transaction >= '{ds}' AND p.date_time_transaction < '{de}'
+GROUP BY DATE_FORMAT(p.date_time_transaction, '{fmt}')
+ORDER BY DATE_FORMAT(p.date_time_transaction, '{fmt}') ASC;
+""".strip()
+
+
+def handle_monthly_gmv_trend(question: str, sql_executor, ds: str, de: str):
+    """Fast GMV trend: lean IPG query (MySQL) + POS GMV from the pre-computed local mart.
+    Returns combined monthly GMV without the heavy live IPG-FX ×3 / POS-dedup that times out."""
+    # IPG monthly GMV: prefer the pre-computed local mart (instant); only fall back to the
+    # live query if the mart isn't built (that live query can take minutes on a full year).
+    ipg_sql = "local summary_mart.sqlite3 -> ipg_daily_gmv"
+    ipg_rows = []
+    _ipg_from_mart = False
+    try:
+        from redesign.pos_summary_mart import ipg_ready, ipg_monthly_gmv
+        if ipg_ready():
+            for ym, (g, cnt) in ipg_monthly_gmv(ds, de).items():
+                ipg_rows.append({"year_month": ym, "ipg_gmv_lkr": round(g, 2), "ipg_volume": cnt})
+            _ipg_from_mart = True
+    except Exception:
+        pass
+    if not _ipg_from_mart:
+        ipg_sql = build_ipg_gmv_trend_sql(ds, de, "month")
+        ipg_rows = sql_executor(ipg_sql)
+        if isinstance(ipg_rows, dict) and "error" in ipg_rows:
+            return {"question": question, "sql": ipg_sql, "raw_result": ipg_rows,
+                    "answer": f"**Database error:** {ipg_rows['error']}",
+                    "insights": "", "response_type": "data_query"}
+        ipg_rows = ipg_rows if isinstance(ipg_rows, list) else []
+
+    # POS GMV per month from the local mart (instant); empty if not backfilled.
+    pos_by_month, pos_note = {}, ""
+    try:
+        from redesign.pos_summary_mart import summary_ready, pos_monthly_gmv
+        if summary_ready():
+            pos_by_month = pos_monthly_gmv(ds, de)
+        else:
+            pos_note = " (POS not included — the local POS summary isn't built yet; showing IPG only.)"
+    except Exception:
+        pos_note = " (POS not included — POS summary unavailable; showing IPG only.)"
+
+    merged = {}
+    for r in ipg_rows:
+        ym = r.get("year_month")
+        merged[ym] = {"year_month": ym,
+                      "ipg_gmv_lkr": float(r.get("ipg_gmv_lkr") or 0),
+                      "ipg_volume": int(r.get("ipg_volume") or 0)}
+    for ym, g in pos_by_month.items():
+        merged.setdefault(ym, {"year_month": ym, "ipg_gmv_lkr": 0, "ipg_volume": 0})
+        merged[ym]["pos_gmv_lkr"] = round(float(g or 0), 2)
+    rows = []
+    for ym in sorted(merged):
+        row = merged[ym]
+        row.setdefault("pos_gmv_lkr", 0)
+        row["combined_gmv_lkr"] = round(row["ipg_gmv_lkr"] + row["pos_gmv_lkr"], 2)
+        rows.append(row)
+
+    try:
+        insights = generate_insights(question, rows)
+    except Exception:
+        insights = None
+    if not insights:
+        insights = "Monthly GMV trend." + pos_note
+    else:
+        insights += pos_note
+
+    return {"question": question, "sql": ipg_sql, "raw_result": rows,
+            "answer": insights, "insights": insights, "response_type": "data_query"}
+
+
+def handle_top_merchants_mart(question: str, n_str=None):
+    """Top-N merchants by GMV from the local mart (instant, both channels,
+    validated dedup/FX logic). The live-MySQL version of this timed out.
+    Returns None when the mart can't serve it (no coverage / no rows)."""
+    try:
+        from redesign.pos_summary_mart import mart_query, mart_coverage
+        cov = mart_coverage()
+        if not cov:
+            return None
+    except Exception:
+        return None
+
+    n = max(1, min(int(n_str) if n_str else 10, 100))
+    intent = analyze_intent(question)
+    ds, de = intent.get("date_start"), intent.get("date_end")
+    default_period = False
+    if not ds or not de:
+        _de = datetime.now().date() + timedelta(days=1)
+        ds, de = (_de - timedelta(days=31)).isoformat(), _de.isoformat()
+        default_period = True
+    mart_start = max(cov.get("pos_from") or "9999", cov.get("ipg_from") or "9999")
+    if ds < mart_start:
+        return None  # period predates mart coverage -> let legacy/agent handle
+
+    ql = question.lower()
+    want_ipg = "ipg" in ql and "pos" not in ql
+    want_pos = "pos" in ql and "ipg" not in ql
+    ipg_expr = "0" if want_pos else "COALESCE(i.gmv,0)"
+    pos_expr = "0" if want_ipg else "COALESCE(p.amt,0)"
+
+    rows = mart_query(f"""
+        SELECT d.merchant_name, d.store_id,
+               ROUND(SUM({ipg_expr}),2) AS ipg_gmv_lkr,
+               ROUND(SUM({pos_expr}),2) AS pos_gmv_lkr,
+               ROUND(SUM({ipg_expr}) + SUM({pos_expr}),2) AS total_gmv_lkr
+        FROM store_dim d
+        LEFT JOIN (SELECT store_id, SUM(gmv) gmv FROM ipg_daily_gmv
+                   WHERE activity_date >= '{ds}' AND activity_date < '{de}'
+                   GROUP BY store_id) i ON i.store_id = d.store_id
+        LEFT JOIN (SELECT store_id, SUM(valid_sale_amount) amt FROM pos_daily_activity
+                   WHERE activity_date >= '{ds}' AND activity_date < '{de}'
+                   GROUP BY store_id) p ON p.store_id = d.store_id
+        GROUP BY d.store_id
+        HAVING total_gmv_lkr > 0
+        ORDER BY total_gmv_lkr DESC
+        LIMIT {n}""")
+    if not isinstance(rows, list) or not rows:
+        return None
+
+    channel = "IPG-only" if want_ipg else ("POS-only" if want_pos else "IPG + POS combined")
+    period = (f"the last 30 days ({ds} to {de}, no period was specified)"
+              if default_period else f"{ds} to {de}")
+    top = rows[0]
+    answer = (f"**Top {len(rows)} merchants by GMV** ({channel}, LKR) for {period}. "
+              f"**{top['merchant_name']}** leads with **Rs {top['total_gmv_lkr']:,.2f}**"
+              + (f", ahead of {rows[1]['merchant_name']} (Rs {rows[1]['total_gmv_lkr']:,.2f})"
+                 if len(rows) > 1 else "") +
+              f".\n\nFigures come from the pre-computed daily summary (validated void-dedup "
+              f"POS + FX-converted IPG), data through {min(cov.get('pos_to') or '', cov.get('ipg_to') or '') or 'today'}.")
+    return {
+        "question": question,
+        "sql": {"mart": f"local summary_mart.sqlite3: store_dim x ipg_daily_gmv x "
+                        f"pos_daily_activity, {ds}..{de}, top {n} by combined GMV"},
+        "raw_result": rows,
+        "answer": answer,
+        "insights": answer,
+        "response_type": "data_query",
+        "engine": "mart",
+    }
+
+
 # =========================================================
 # OPTIONAL END-TO-END HANDLER
 # =========================================================
-def handle_user_question(question: str, sql_executor):
+def handle_user_question(question: str, sql_executor, history=None):
     """
     sql_executor(sql: str) -> result (e.g., list[dict])
+    history: optional list of {"role": "user"|"assistant", "content": str} (recent last)
+             used to resolve follow-up questions into standalone ones.
 
     Returns:
     {
@@ -4410,7 +5620,97 @@ def handle_user_question(question: str, sql_executor):
         "insights": ...
     }
     """
-    # ── Step 0: classify the question ──────────────────────────────────────
+    # ── Step -1: learn durable rules from user corrections ─────────────────
+    # "for active merchants you should check is_active = 1 and free_trail = 0"
+    # gets extracted into a persistent rule (learned_lessons.json) that is
+    # injected into every future SQL/agent prompt, so the same mistake is not
+    # repeated. A pure teaching message is acknowledged without running SQL;
+    # a "fix it and show me" message saves the rule and continues the pipeline.
+    try:
+        from learning_store import detect_correction, save_lesson
+        _corr = detect_correction(question, history)
+        if _corr.get("is_correction") and _corr.get("rule"):
+            _saved = save_lesson(_corr["rule"], source_question=question)
+            if _saved:
+                print(f"[handle_user_question] learned rule: {_corr['rule']}")
+            if _saved and not _corr.get("also_wants_data"):
+                _ack = (
+                    "Got it — I've learned this rule and will apply it to every "
+                    f"future question:\n\n> {_corr['rule']}\n\n"
+                    "You can ask me the question again now and I'll use it."
+                )
+                return {
+                    "question": question,
+                    "sql": None,
+                    "raw_result": [],
+                    "answer": _ack,
+                    "insights": _ack,
+                    "response_type": "learning",
+                }
+    except Exception as _learn_e:
+        print(f"[handle_user_question] learning unavailable: {_learn_e}")
+
+    # ── Step 0: resolve follow-ups using conversation context ──────────────
+    # Decides data-vs-meta and rewrites follow-ups into standalone questions.
+    # META ("why didn't you find that before", "are you sure?") is answered
+    # conversationally from history and must NOT run SQL.
+    _interp = interpret_followup(question, history)
+    if _interp.get("kind") == "meta" and _interp.get("answer"):
+        # NEVER let a meta-refusal swallow a question the outlook/advisor paths can
+        # actually answer ("where will webxpay be in 5 years", "are we keeping up with
+        # market trends") — the follow-up LLM used to reply "I cannot make predictions"
+        # before those handlers ever saw the question.
+        _is_ol = _is_adv = False
+        try:
+            from outlook import is_outlook_question as _ioq
+            _is_ol = _ioq(question)
+        except Exception:
+            pass
+        try:
+            from advisor import is_advisor_question as _iaq
+            _is_adv = _iaq(question)
+        except Exception:
+            pass
+        if not (_is_ol or _is_adv):
+            return {
+                "question": question,
+                "sql": None,
+                "raw_result": [],
+                "answer": _interp["answer"],
+                "insights": _interp["answer"],
+                "response_type": "conversation",
+            }
+    # "what about allianz on these two days" → standalone question with the dates
+    # and metric carried over from the previous turn.
+    question = _interp.get("question") or question
+
+    # ── Step 0a-outlook: forward-looking questions get grounded projections ──
+    # "where would webxpay be in 10 years" used to be refused by the knowledge
+    # classifier. Now: measured history (mart) + deterministic scenario math in
+    # code + an LLM narrative that may only use those computed figures.
+    try:
+        from outlook import is_outlook_question, handle_outlook
+        if is_outlook_question(question):
+            _outlook = handle_outlook(question, sql_executor, history=history)
+            if isinstance(_outlook, dict) and _outlook.get("answer"):
+                return _outlook
+    except Exception as _ol_e:
+        print(f"[handle_user_question] outlook unavailable: {_ol_e}")
+
+    # ── Step 0a-advisor: opinion/comparison/strategy questions ─────────────
+    # "is our gmv run good compared to other fintechs" used to be refused by
+    # the grounded-DB-only prompts. The advisor answers with judgment: internal
+    # measured facts + clearly-labeled general industry knowledge.
+    try:
+        from advisor import is_advisor_question, handle_advisor
+        if is_advisor_question(question):
+            _adv = handle_advisor(question, sql_executor, history=history)
+            if isinstance(_adv, dict) and _adv.get("answer"):
+                return _adv
+    except Exception as _adv_e:
+        print(f"[handle_user_question] advisor unavailable: {_adv_e}")
+
+    # ── Step 0b: classify the question ─────────────────────────────────────
     classification = classify_question(question)
     q_type = classification.get("type", "data_query")
 
@@ -4425,6 +5725,112 @@ def handle_user_question(question: str, sql_executor):
             "insights": answer,
             "response_type": q_type,
         }
+
+    # ── Step 0b2: POS non-transacting merchants — instant from the local mart ──
+    # The legacy path ran a 148s live dedup scan and then the insights layer
+    # mis-described the (correct) result. The mart handler is instant and its
+    # answer is deterministic. Skipped for person/RM-filtered variants (agent).
+    _nt_kw = ("non transacting", "non-transacting", "not transacting", "no transaction",
+              "zero transaction", "haven't transacted", "not transacted", "dormant")
+    _ql_nt = question.lower()
+    # "onboarded this year with zero transactions" needs an onboarding-date filter the
+    # mart handler doesn't apply — let the onboarding/agent paths take those.
+    if any(k in _ql_nt for k in _nt_kw) and "onboard" not in _ql_nt:
+        try:
+            from agent_engine import needs_agent_heuristic as _nah
+            from redesign.pos_summary_mart import summary_ready, handle_non_transacting
+            if not _nah(question) and summary_ready():
+                _intent_nt = analyze_intent(question)
+                _has_pos_nt = "pos" in _ql_nt
+                _has_ipg_nt = "ipg" in _ql_nt or "online" in _ql_nt
+                _chan_nt = ("pos" if (_has_pos_nt and not _has_ipg_nt)
+                            else "ipg" if (_has_ipg_nt and not _has_pos_nt)
+                            else "any")
+                _nt = handle_non_transacting(
+                    question, _intent_nt.get("date_start"), _intent_nt.get("date_end"),
+                    sql_executor, channel=_chan_nt)
+                if isinstance(_nt, dict) and isinstance(_nt.get("raw_result"), list):
+                    return _nt
+        except Exception as _nt_e:
+            print(f"[handle_user_question] mart non-transacting unavailable: {_nt_e}")
+
+    # ── Step 0b3: MONTH-vs-MONTH merchant comparison — BEFORE the LLM router ──
+    # "merchants who dropped less than 10% in june compared to may" must hit the
+    # deterministic month-comparison handler every time. It used to sit after the
+    # router, which sometimes (nondeterministically) labeled it "agent" — the agent
+    # then returned an inferior 200-row fallback with wrong percentages.
+    _two_months_pre = _parse_two_months(question)
+    if _two_months_pre and "onboard" not in question.lower():
+        _ql_mc = question.lower()
+        _mc_words_pre = ("compare", "compared", "comparing", "comparison", "vs", "versus",
+                         "drop", "dropped", "decline", "declined", "fell", "fall",
+                         "less than", "didn't transact", "didnt transact", "did not transact",
+                         "stopped", "churn", "churned", "inactive", "no transaction",
+                         "lower", "decrease", "decreased", "reduction", "between")
+        _mc_subj_pre = ("gmv", "transact", "revenue", "sales", "value", "merchant", "volume")
+        if any(w in _ql_mc for w in _mc_words_pre) and any(s in _ql_mc for s in _mc_subj_pre):
+            _mc_pre = handle_month_gmv_comparison(question, sql_executor,
+                                                  months=_two_months_pre)
+            if _mc_pre is not None:
+                return _mc_pre
+
+    # ── Step 0b4: IPG-vs-POS channel comparison — deterministic route to agent ──
+    # "Compare IPG and POS performance (on may)" must not depend on the LLM router:
+    # the agent answers it well from the mart (one grouped query per channel), while
+    # the legacy keyword paths returned merchant-type lists for it.
+    _ql_ch = question.lower()
+    if (re.search(r"(?i)\bipg\b.{0,40}\bpos\b|\bpos\b.{0,40}\bipg\b", question)
+            and any(w in _ql_ch for w in ("compare", "compared", "comparison", " vs ",
+                                          "versus", "performance"))
+            and "merchant" not in _ql_ch):
+        try:
+            from agent_engine import answer_with_agent as _awa_ch
+            _ch_out = _awa_ch(question, sql_executor, history=history)
+            if isinstance(_ch_out, dict) and _ch_out.get("answer"):
+                return _ch_out
+        except Exception as _ch_e:
+            print(f"[handle_user_question] channel-comparison agent unavailable: {_ch_e}")
+
+    # ── Step 0c: semantic router — non-canonical questions go to the agent ──
+    # The agent reasons over the real schema and investigates with several
+    # read-only queries (resolve person/merchant names, inspect values, then
+    # compute), instead of keyword-matched templates. Canonical metric
+    # questions (GMV/revenue/MDR/volume/trends/top merchants) stay on the
+    # validated legacy pipeline below so those numbers keep matching Power BI.
+    try:
+        from agent_engine import route_question, answer_with_agent, needs_agent_heuristic
+        if route_question(question) == "agent":
+            _agent_out = answer_with_agent(question, sql_executor, history=history)
+            if isinstance(_agent_out, dict) and _agent_out.get("answer"):
+                return _agent_out
+            # Agent declined or failed. For person/RM/terminal questions the
+            # legacy keyword templates CANNOT answer (no RM logic) — falling
+            # through once returned an unrelated 77-row merchant-type list. Be
+            # honest instead of showing plausible-looking wrong data.
+            if needs_agent_heuristic(question):
+                _busy = ("I couldn't complete the analysis for this question right now — "
+                         "the reasoning engine that handles people/RM questions didn't "
+                         "return a result (it may be temporarily overloaded). Please ask "
+                         "again in a moment; nothing is wrong with your question.")
+                return {
+                    "question": question,
+                    "sql": None,
+                    "raw_result": [],
+                    "answer": _busy,
+                    "insights": _busy,
+                    "response_type": "conversation",
+                }
+            # non-person question → legacy pipeline can genuinely handle it
+    except Exception as _agent_e:
+        print(f"[handle_user_question] agent route unavailable: {_agent_e}")
+
+    # ── Step 0d: top-N merchants by GMV — instant from the local mart ──────
+    # The live-MySQL version of this ranking timed out ("Top 10 merchants by GMV").
+    _top_m = re.search(r"(?i)\btop\s+(\d{1,3})?\s*merchants?\b", question)
+    if _top_m and not any(w in question.lower() for w in ("revenue", "mdr", "volume", "count")):
+        _fast = handle_top_merchants_mart(question, _top_m.group(1))
+        if _fast:
+            return _fast
 
     # ── Step 1: multi-year comparison (e.g. "2025 vs 2026 GMV") ──────────
     # Check this BEFORE overview mode so "2025 vs 2026" doesn't get swallowed
@@ -4454,6 +5860,38 @@ def handle_user_question(question: str, sql_executor):
             "insights": _insights_ob,
             "response_type": "data_query",
         }
+
+    # (MONTH-vs-MONTH comparison moved to Step 0b3 above — it must run BEFORE the
+    #  LLM router so it fires deterministically, and before the two-date diagnosis
+    #  which would mis-read "june and may" as the single days June-1 vs May-1.)
+
+    # ── Step 1b-pre-0a-diag: two-date comparison ("did the 11th beat the 12th, why") ──
+    # Fetches each merchant's IPG+POS GMV on both days and ranks the movers, so the
+    # answer is grounded in real per-merchant numbers (not a guess). Must run before
+    # the merchant-type handler (which otherwise grabs it and returns a name list).
+    #
+    # PRIMARY: LLM structured extraction — works for ANY phrasing and resolves
+    # relative dates ("the next day", weekday names). FALLBACK: legacy keyword+regex
+    # gate, used only if the LLM call fails/returns nothing (offline safety).
+    _spec = llm_extract_query_spec(question)
+    _spec_dates = _spec.get("dates") or []
+    if _spec.get("two_date_comparison") and len(_spec_dates) >= 2:
+        _diag = handle_gmv_drop_diagnosis(
+            question, sql_executor, dates=(_spec_dates[0], _spec_dates[1])
+        )
+        if _diag is not None:
+            return _diag
+
+    _diag_words = ("why", "reason", "caused", "cause", "drop", "dropped", "decline",
+                   "declined", "fell", "fall", "difference between", "what happened",
+                   "compare", "compared")
+    if (any(w in ql_huq for w in _diag_words)
+            and ("gmv" in ql_huq or "transaction" in ql_huq or "revenue" in ql_huq
+                 or "value" in ql_huq or "sales" in ql_huq)
+            and _parse_two_dates(question)):
+        _diag = handle_gmv_drop_diagnosis(question, sql_executor)
+        if _diag is not None:
+            return _diag
 
     # ── Step 1b-pre-0a: Merchant type queries (IPG only / POS only / both) ──
     ql_huq = question.lower()
@@ -4498,7 +5936,16 @@ def handle_user_question(question: str, sql_executor):
                    "ipg merchant", "pos merchant", "merchant with both", "merchants with both",
                    "have both", "has both", "using both", "both channel", "both channels",
                    "both pos and ipg", "both ipg and pos"]
-    if any(k in ql_huq for k in _mtype_kw_h) and "transact" not in ql_huq:
+    # GUARD: this handler is for merchant CHANNEL-SETUP lists/counts ("merchants with
+    # both IPG and POS", "IPG only merchants"). A METRIC question that merely mentions
+    # both channels ("Compare IPG and POS performance for May", "GMV across IPG and POS
+    # channels") must NOT be hijacked into a merchant-type list — that broke channel
+    # comparisons and every follow-up whose rewrite contained "IPG and POS".
+    _mtype_metric_words = ("performance", "compare", "compared", "comparison", " vs ",
+                           "versus", "gmv", "revenue", "volume", "sales", "value",
+                           "summary", "summarize", "summarise", "top ", "best", "trend")
+    if (any(k in ql_huq for k in _mtype_kw_h) and "transact" not in ql_huq
+            and not any(w in ql_huq for w in _mtype_metric_words)):
         _schema_mt = load_schema()
         _sql_mt = generate_sql(question, _schema_mt)
         _result_mt = sql_executor(_sql_mt)
@@ -4583,6 +6030,31 @@ def handle_user_question(question: str, sql_executor):
             "response_type": "data_query",
         }
 
+    # ── Step 1b-pre-rm: Store + Relationship Manager (RM) name ──
+    # "which RM handles X", "show stores with their RM names", "rm code / manager for <store>"
+    if any(k in ql_huq for k in ("rm name", "rm names", "relationship manager", "which rm",
+                                 "rm handles", "rm for", "manager name", "rm of", "signup rm",
+                                 "store with rm", "stores with rm", "merchant rm", "rm code")):
+        _rm_sql = build_store_rm_sql(question)
+        _rm_res = sql_executor(_rm_sql)
+        _rm_ins = generate_insights(question, _rm_res)
+        return {"question": question, "sql": _rm_sql, "raw_result": _rm_res,
+                "answer": _rm_ins, "insights": _rm_ins, "response_type": "data_query"}
+
+    # ── Step 1b-pre-2-gmv: FAST GMV trend (lean IPG + POS from local mart) ──
+    # A plain "monthly GMV trend" would otherwise run the heavy all-metrics IPG timeseries
+    # (exchange-rate math ×3) AND the POS void-dedup, and time out. When the user only wants
+    # GMV over time (no revenue/mdr/status), use the lean path instead.
+    _gmv_grain = intent_check.get("time_grain")
+    _gmv_ds    = intent_check.get("date_start")
+    _gmv_de    = intent_check.get("date_end")
+    if (_gmv_grain and _gmv_ds and _gmv_de
+            and intent_check.get("type") == "gmv"
+            and detect_channel(question) != "pos"
+            and not any(w in ql_huq for w in ("revenue", "mdr", "approved", "declined",
+                                              "abandoned", "cancelled", "status"))):
+        return handle_monthly_gmv_trend(question, sql_executor, _gmv_ds, _gmv_de)
+
     # ── Step 1b-pre-2: Timeseries — explicit grain + metric → bypass overview ──
     # "Monthly trend for GMV 2025", "weekly revenue 2025", etc.
     # Must run BEFORE detect_high_level_mode which swallows "trend/trends" keywords.
@@ -4654,6 +6126,29 @@ def handle_user_question(question: str, sql_executor):
     if mode == "period_overview" and not is_known_wrong(question):
         return handle_period_overview(question, sql_executor)
 
+    # ── Step 1b-cmp: cross-month comparison / anomaly questions ────────────
+    # "were there unusual values in June vs other months", "compare the months",
+    # "does any month stand out" → the bot must FETCH every month and compare, not
+    # return a single total. Route to the overview path (it widens to the full year
+    # and pulls a monthly breakdown for these).
+    _qlc = question.lower()
+    _is_month_compare = (
+        any(p in _qlc for p in [
+            "other months", "other month", "across months", "month over month",
+            "month-over-month", "compared to other", "vs other", "between months",
+            "previous months", "prior months", "each month", "every month",
+        ])
+        or (any(w in _qlc for w in [
+                "unusual", "anomal", "stand out", "stands out", "stood out",
+                "outlier", "spike", "spiked", "compare", "compared",
+            ]) and any(mn in _qlc for mn in [
+                "month", "january", "february", "march", "april", "may", "june",
+                "july", "august", "september", "october", "november", "december",
+            ]))
+    )
+    if _is_month_compare and not is_known_wrong(question):
+        return handle_period_overview(question, sql_executor)
+
     # ── Step 1c: top N merchants per-merchant ranking ─────────────────────
     if _TOP_MERCHANT_RE.search(question):
         return handle_top_merchants(question, intent_check, sql_executor)
@@ -4713,6 +6208,19 @@ def handle_user_question(question: str, sql_executor):
                 result = fallback_result
         except Exception:
             pass
+
+    # ── Step 3b: agentic last resort — the template SQL found nothing ──────
+    # Before giving up (or reporting a DB error), let the schema-aware agent
+    # investigate the question from scratch; it can fix wrong assumptions the
+    # one-shot template SQL made (name spellings, joins, date columns).
+    if _is_error(result) or not result:
+        try:
+            from agent_engine import answer_with_agent
+            _agent_out = answer_with_agent(question, sql_executor, history=history)
+            if isinstance(_agent_out, dict) and _agent_out.get("answer"):
+                return _agent_out
+        except Exception as _agent_e:
+            print(f"[handle_user_question] agent fallback unavailable: {_agent_e}")
 
     # If still an error dict, surface the DB error message to the user
     if _is_error(result):

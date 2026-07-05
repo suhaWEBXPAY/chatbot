@@ -1,0 +1,434 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>WEBXPAY Analytics Chatbot — Knowledge Transfer</title>
+<style>
+  @page { size: A4; margin: 18mm 16mm 20mm 16mm; }
+  * { box-sizing: border-box; }
+  html { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  body {
+    font-family: "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+    color: #1f2733; font-size: 10.5pt; line-height: 1.5; margin: 0;
+  }
+  h1, h2, h3, h4 { color: #0b2a4a; line-height: 1.25; }
+  h1 { font-size: 26pt; margin: 0 0 4px; }
+  h2 {
+    font-size: 16pt; margin: 26px 0 10px; padding-bottom: 6px;
+    border-bottom: 3px solid #1565c0;
+  }
+  h3 { font-size: 12.5pt; margin: 18px 0 6px; color: #1565c0; }
+  h4 { font-size: 11pt; margin: 14px 0 4px; color: #2c3e50; }
+  p { margin: 6px 0; }
+  code {
+    font-family: "Cascadia Code", "Consolas", monospace; font-size: 9pt;
+    background: #eef2f7; padding: 1px 5px; border-radius: 4px;
+    color: #b5306e;
+  }
+  pre {
+    background: #0d1b2a; color: #d6e4f0; padding: 12px 14px; border-radius: 8px;
+    font-family: "Cascadia Code", "Consolas", monospace; font-size: 8.5pt;
+    line-height: 1.45; overflow-x: auto; white-space: pre-wrap; word-break: break-word;
+  }
+  pre code { background: none; color: inherit; padding: 0; }
+  ul, ol { margin: 6px 0 6px 0; padding-left: 22px; }
+  li { margin: 3px 0; }
+  table { border-collapse: collapse; width: 100%; margin: 10px 0; font-size: 9.2pt; }
+  th, td { border: 1px solid #c9d6e3; padding: 6px 9px; text-align: left; vertical-align: top; }
+  th { background: #1565c0; color: #fff; font-weight: 600; }
+  tr:nth-child(even) td { background: #f3f7fb; }
+  .cover {
+    height: 247mm; display: flex; flex-direction: column; justify-content: center;
+    page-break-after: always;
+    background: linear-gradient(135deg, #0b2a4a 0%, #1565c0 100%);
+    color: #fff; margin: -18mm -16mm 0 -16mm; padding: 0 26mm;
+  }
+  .cover h1 { color: #fff; font-size: 34pt; }
+  .cover .sub { font-size: 15pt; opacity: .92; margin-top: 6px; font-weight: 300; }
+  .cover .tag {
+    display: inline-block; margin-top: 26px; padding: 7px 16px;
+    border: 1px solid rgba(255,255,255,.55); border-radius: 30px; font-size: 10.5pt;
+    letter-spacing: .5px;
+  }
+  .cover .meta { margin-top: 40px; font-size: 10pt; opacity: .85; line-height: 1.9; }
+  .callout {
+    border-left: 4px solid #1565c0; background: #eef4fb; padding: 9px 14px;
+    border-radius: 0 6px 6px 0; margin: 10px 0;
+  }
+  .callout.warn { border-left-color: #e08a00; background: #fff6e6; }
+  .callout.good { border-left-color: #2e9e5b; background: #eaf7ef; }
+  .pill {
+    display: inline-block; background: #1565c0; color: #fff; font-size: 8pt;
+    padding: 1px 8px; border-radius: 20px; margin-right: 4px; font-weight: 600;
+  }
+  .pill.green { background: #2e9e5b; } .pill.orange { background: #e08a00; }
+  .pill.grey { background: #5a6b7b; } .pill.purple { background: #6a4ca5; }
+  .toc a { color: #1565c0; text-decoration: none; }
+  .toc li { margin: 5px 0; }
+  .section { page-break-inside: avoid; }
+  .flow {
+    font-family: "Cascadia Code", "Consolas", monospace; font-size: 8.6pt;
+    background: #f3f7fb; border: 1px solid #c9d6e3; border-radius: 8px;
+    padding: 14px; line-height: 1.7; white-space: pre; overflow-x: auto;
+  }
+  .small { font-size: 8.7pt; color: #5a6b7b; }
+  hr { border: none; border-top: 1px solid #dce5ee; margin: 18px 0; }
+  .footer-note { font-size: 8.5pt; color: #5a6b7b; margin-top: 4px; }
+</style>
+</head>
+<body>
+
+<!-- ============ COVER ============ -->
+<div class="cover">
+  <h1>WEBXPAY Analytics Chatbot</h1>
+  <div class="sub">Knowledge Transfer &amp; Architecture Document</div>
+  <div class="tag">Natural-Language → SQL → Insights over a Payment-Gateway Database</div>
+  <div class="meta">
+    <strong>System:</strong> Flask + LLM-assisted SQL analytics assistant<br>
+    <strong>Domain:</strong> IPG (online) &amp; POS (terminal) payment analytics — GMV, Revenue, MDR, Volume<br>
+    <strong>Audience:</strong> Engineers &amp; analysts taking over / extending the project<br>
+    <strong>Prepared:</strong> June 2026
+  </div>
+</div>
+
+<!-- ============ TOC ============ -->
+<h2>Contents</h2>
+<ol class="toc">
+  <li><a href="#overview">What the system does</a></li>
+  <li><a href="#stack">Technology stack &amp; repository layout</a></li>
+  <li><a href="#arch">High-level architecture &amp; request flow</a></li>
+  <li><a href="#auth">Authentication &amp; session layer (<code>auth.py</code>)</a></li>
+  <li><a href="#api">Web/API layer (<code>app.py</code>)</a></li>
+  <li><a href="#db">Database access &amp; safety (<code>db.py</code>)</a></li>
+  <li><a href="#brain">The brain — <code>gpt_helpers.py</code></a></li>
+  <li><a href="#router">Intent classification &amp; the routing pipeline</a></li>
+  <li><a href="#sql">SQL generation strategy (templates vs. LLM)</a></li>
+  <li><a href="#insights">Insight &amp; answer generation</a></li>
+  <li><a href="#feedback">Feedback, caching &amp; self-correction loop</a></li>
+  <li><a href="#frontend">Frontend (<code>static/</code>)</a></li>
+  <li><a href="#domain">Domain glossary &amp; business rules</a></li>
+  <li><a href="#e2e">End-to-end worked example</a></li>
+  <li><a href="#run">How to run &amp; configure</a></li>
+  <li><a href="#extend">How to extend / maintenance notes</a></li>
+</ol>
+
+<!-- ============ 1. OVERVIEW ============ -->
+<h2 id="overview">1. What the system does</h2>
+<p>
+The project is an internal <strong>analytics chatbot</strong> for <strong>WEBXPAY</strong>, a Sri Lankan
+payment gateway. A logged-in business user types a plain-English question
+(e.g. <em>"What was the IPG revenue for March 2025?"</em> or <em>"Monthly GMV trend for 2025"</em>),
+and the system:
+</p>
+<ol>
+  <li>Understands the <strong>intent</strong> (which metric, which channel, which date range, which grain).</li>
+  <li>Builds a <strong>safe, read-only SQL query</strong> — usually from hand-tuned templates, occasionally LLM-generated.</li>
+  <li>Runs it against the live <strong>MySQL</strong> production-analytics database.</li>
+  <li>Returns a <strong>natural-language answer + a data table + auto-generated charts</strong>.</li>
+</ol>
+<div class="callout">
+  <strong>Design philosophy:</strong> The LLM is used as a <em>router and explainer</em>, not as a free-form
+  SQL engine. The financially-sensitive metrics (GMV, Revenue, MDR) are computed with <strong>fixed,
+  Power-BI-verified SQL templates</strong> so numbers are deterministic and trustworthy. The LLM only fills gaps.
+</div>
+
+<!-- ============ 2. STACK ============ -->
+<h2 id="stack">2. Technology stack &amp; repository layout</h2>
+<table>
+  <tr><th>Layer</th><th>Technology</th><th>Notes</th></tr>
+  <tr><td>Web framework</td><td>Flask</td><td>Single app, session-cookie auth</td></tr>
+  <tr><td>LLM</td><td>Google Gemini (<code>gemini-2.5-flash</code>)</td><td>Called through the <strong>OpenAI-compatible</strong> client, so the code reads like OpenAI</td></tr>
+  <tr><td>Analytics DB</td><td>MySQL</td><td>Read-only SELECTs only; connection pool of 8</td></tr>
+  <tr><td>Auth / sessions DB</td><td>SQLite (<code>auth_users.sqlite3</code>)</td><td>Users + saved chat sessions</td></tr>
+  <tr><td>Frontend</td><td>Vanilla HTML/CSS/JS + Chart.js</td><td>No build step; served as static files</td></tr>
+  <tr><td>Feedback / cache</td><td>JSON file + SQLite</td><td><code>feedback_log.json</code>, <code>query_cache.sqlite3</code></td></tr>
+</table>
+
+<h3>Key files</h3>
+<table>
+  <tr><th>File</th><th>Role</th></tr>
+  <tr><td><code>app.py</code></td><td>Flask entry point. Routes: <code>/ask</code>, <code>/feedback</code>, <code>/</code>. Normalizes the response payload.</td></tr>
+  <tr><td><code>auth.py</code></td><td>User accounts, login/session, role guards, and saved chat-session storage (SQLite).</td></tr>
+  <tr><td><code>db.py</code></td><td>MySQL connection pool + the <strong>read-only SQL guard</strong> (<code>run_sql</code>).</td></tr>
+  <tr><td><code>gpt_helpers.py</code></td><td><strong>The brain.</strong> ~5,000 lines: intent analysis, routing, SQL templates, LLM calls, insight generation.</td></tr>
+  <tr><td><code>schema.txt</code></td><td>Plain-text dump of every DB table + columns, fed to the LLM as context.</td></tr>
+  <tr><td><code>dax_measures.py</code></td><td>Reference library of Power BI DAX measures — the "source of truth" for how each metric is officially defined.</td></tr>
+  <tr><td><code>static/index.html</code></td><td>The chat UI (~2,300 lines): chat, history, charts, tables, feedback buttons.</td></tr>
+  <tr><td><code>static/login.html</code>, <code>users.html</code></td><td>Login screen and admin user-management page.</td></tr>
+</table>
+
+<!-- ============ 3. ARCHITECTURE ============ -->
+<h2 id="arch">3. High-level architecture &amp; request flow</h2>
+<div class="flow">
+ ┌──────────────┐    HTTPS      ┌───────────────────────── Flask (app.py) ─────────────────────────┐
+ │   Browser    │  POST /ask    │                                                                   │
+ │ static/      │ ────────────► │  @login_required ──► auth.py (SQLite: users + sessions)           │
+ │ index.html   │               │        │                                                          │
+ │  • chat UI   │               │        ▼                                                          │
+ │  • Chart.js  │ ◄──────────── │  handle_user_question(question, run_sql)   [gpt_helpers.py]       │
+ │  • tables    │   JSON        │        │                                                          │
+ └──────────────┘  {answer,     │        ├─ 1. classify  (greeting / knowledge / data_query)        │
+                    sql,        │        ├─ 2. analyze_intent (metric, dates, channel, grain)       │
+                    result,     │        ├─ 3. ROUTER → pick a handler / SQL template               │
+                    timeseries} │        ├─ 4. build SQL  (template  OR  LLM-refined)               │
+                                │        ├─ 5. run_sql ───────────────► MySQL (read-only pool)      │
+                                │        └─ 6. generate_insights / build_short_answer (LLM)         │
+                                └───────────────────────────────────────────────────────────────────┘
+                                          │
+                            ┌─────────────┴──────────────┐
+                            ▼                             ▼
+                   Gemini (LLM, OpenAI-compat)     feedback_log.json / query_cache
+                   • classify knowledge Qs         • learn from 👍 / 👎
+                   • generate/refine SQL           • reuse correct SQL
+                   • write insights                • avoid repeating wrong SQL
+</div>
+<p class="footer-note">
+The browser only ever talks to Flask. Flask is the only thing that talks to MySQL, the LLM, and the local stores.
+</p>
+
+<!-- ============ 4. AUTH ============ -->
+<h2 id="auth">4. Authentication &amp; session layer — <code>auth.py</code></h2>
+<p>Self-contained auth on a local <strong>SQLite</strong> DB (<code>auth_users.sqlite3</code>) with two tables:</p>
+<ul>
+  <li><code>users</code> — username, email, <strong>password hash</strong> (Werkzeug), role (<span class="pill">admin</span><span class="pill grey">user</span>), <code>is_active</code>, timestamps.</li>
+  <li><code>chat_sessions</code> — per-user saved conversations (<code>messages_json</code>) with <strong>last-write-wins</strong> sync via a <code>client_updated_at</code> counter.</li>
+</ul>
+<h3>How it protects routes</h3>
+<ul>
+  <li><code>@login_required</code> — wraps a view; redirects browsers to <code>/login</code>, returns <code>401 JSON</code> for API/<code>/ask</code> calls.</li>
+  <li><code>@admin_required</code> — same, but also requires <code>role == "admin"</code> (used for <code>/users</code> and user management APIs).</li>
+  <li>Session stored in a signed Flask cookie (HTTPOnly, SameSite=Lax; Secure if <code>SESSION_COOKIE_SECURE</code> set).</li>
+</ul>
+<div class="callout warn">
+  <strong>First-run bootstrap:</strong> When the users table is empty, <code>signup_enabled()</code> returns true so the
+  <em>very first</em> account can self-register and is automatically made <span class="pill">admin</span>. After that,
+  signup closes and only admins can create accounts. Default <code>secret_key</code> is <code>"change-me-before-deploying"</code> — must be overridden in production.
+</div>
+<h4>Auth-related routes</h4>
+<table>
+  <tr><th>Route</th><th>Purpose</th></tr>
+  <tr><td><code>POST /auth/login</code> · <code>/auth/register</code></td><td>Login / register; sets session, updates <code>last_login_at</code>.</td></tr>
+  <tr><td><code>GET /auth/status</code></td><td>Tells the frontend whether setup/signup is needed and who is logged in.</td></tr>
+  <tr><td><code>GET/POST /api/users</code>, <code>PATCH /api/users/&lt;id&gt;/status</code></td><td>Admin: list/create users, (de)activate. Can't deactivate yourself.</td></tr>
+  <tr><td><code>GET/PUT/DELETE /api/chat-sessions[/&lt;id&gt;]</code></td><td>Load, save, delete a user's saved chats.</td></tr>
+</table>
+
+<!-- ============ 5. APP ============ -->
+<h2 id="api">5. Web / API layer — <code>app.py</code></h2>
+<p>Thin layer. Its real job is to call <code>handle_user_question()</code> and then <strong>normalize</strong> the result into a stable shape the frontend can always rely on.</p>
+<h3><code>POST /ask</code> — the main endpoint</h3>
+<ol>
+  <li>Reads <code>question</code> from JSON (requires login).</li>
+  <li>Calls <code>handle_user_question(question, run_sql)</code> → a <code>payload</code> dict.</li>
+  <li><strong>Normalizes</strong>:
+    <ul>
+      <li><code>timeseries</code> → always <code>{grain, ipg:[], pos:[]}</code> (errors moved to an <code>errors</code> key).</li>
+      <li><code>result</code> → always a <code>list[dict]</code> (the table the UI renders). For "overview" answers it <strong>merges IPG+POS time-series rows</strong> on the grain key and adds <code>combined_gmv/revenue/volume</code>.</li>
+    </ul>
+  </li>
+  <li>Returns one JSON object: <code>{question, sql, result, raw_result, timeseries, insights, response_type}</code>.</li>
+</ol>
+<div class="callout">All errors are caught and returned as a normal <code>200</code> with the error inside <code>insights</code>, so the chat never shows a broken request.</div>
+<h3>Other routes</h3>
+<ul>
+  <li><code>POST /feedback</code> — appends a 👍/👎 record (question, sql, insights) to <code>feedback_log.json</code>.</li>
+  <li><code>GET /</code> — serves <code>static/index.html</code> (login required).</li>
+</ul>
+
+<!-- ============ 6. DB ============ -->
+<h2 id="db">6. Database access &amp; safety — <code>db.py</code></h2>
+<ul>
+  <li>Creates a MySQL <strong>connection pool</strong> (size 8) from <code>.env</code> credentials; falls back to a direct connect if the pool fails.</li>
+  <li><code>run_sql(query)</code> is the single execution path used everywhere. Before running it enforces a <strong>read-only guard</strong>:</li>
+</ul>
+<div class="callout good">
+  <strong>SQL safety guard (<code>_is_read_only_select</code>):</strong> strips comments/string-literals, then rejects
+  anything that isn't a single <code>SELECT</code>/<code>WITH</code> statement, blocks all write/DDL keywords
+  (<code>INSERT, UPDATE, DELETE, DROP, ALTER, CREATE, …</code>) and <code>INTO OUTFILE/DUMPFILE</code>. Any failure
+  returns <code>{"error": "..."}</code> instead of executing.
+</div>
+<p>Results come back as <code>list[dict]</code> (dictionary cursor); errors as <code>{"error": str}</code>. This shape is what every handler downstream expects.</p>
+
+<!-- ============ 7. BRAIN ============ -->
+<h2 id="brain">7. The brain — <code>gpt_helpers.py</code></h2>
+<p>This is the heart of the system. It is organized into clear bands of functions:</p>
+<table>
+  <tr><th>Band</th><th>Representative functions</th><th>Job</th></tr>
+  <tr><td>Setup</td><td><code>load_schema</code>, OpenAI/Gemini <code>client</code></td><td>LLM client + schema text</td></tr>
+  <tr><td>Feedback/cache</td><td><code>is_known_wrong</code>, <code>load_wrong_feedback</code>, <code>get_cached_sql</code></td><td>Learn from past 👍/👎</td></tr>
+  <tr><td>Date / NLP parsing</td><td><code>extract_date_range</code>, <code>fuzzy_months</code>, <code>detect_*</code></td><td>Turn words into dates, channels, grains</td></tr>
+  <tr><td>Intent</td><td><code>analyze_intent</code>, <code>classify_question</code></td><td>Decide what the user wants</td></tr>
+  <tr><td>SQL templates</td><td><code>build_pos_sql</code>, <code>build_revenue_sql</code>, <code>build_gmv_sql</code>, <code>build_*_timeseries_sql</code>, …</td><td>Deterministic, verified SQL per metric</td></tr>
+  <tr><td>LLM SQL</td><td><code>build_generic_sql</code>, <code>refine_sql_with_llm</code>, <code>generate_sql</code></td><td>Fallback / gap-filling SQL generation</td></tr>
+  <tr><td>Handlers</td><td><code>handle_period_overview</code>, <code>handle_top_merchants</code>, <code>handle_combined_query</code>, <code>handle_year_comparison</code>, <code>handle_gmv_drop_diagnosis</code></td><td>Multi-query orchestrations</td></tr>
+  <tr><td>Answer layer</td><td><code>build_short_answer</code>, <code>generate_insights</code>, <code>_compute_result_facts</code></td><td>Turn rows into prose (grounded, no fabrication)</td></tr>
+  <tr><td>Orchestrator</td><td><code>handle_user_question</code></td><td>The top-level router that ties it all together</td></tr>
+</table>
+
+<!-- ============ 8. ROUTER ============ -->
+<h2 id="router">8. Intent classification &amp; the routing pipeline</h2>
+<p>Every question flows through <code>handle_user_question()</code>, which runs an <strong>ordered cascade</strong> of checks. Order matters — earlier, more specific patterns win so they aren't "swallowed" by broader ones.</p>
+<h3>Step 0 — <code>classify_question()</code> (pure Python, no LLM)</h3>
+<ul>
+  <li><span class="pill green">greeting</span> → canned help message.</li>
+  <li><span class="pill purple">knowledge</span> ("what is MDR?", "explain IPG") → one small Gemini call with embedded WEBXPAY context. No SQL.</li>
+  <li><span class="pill">data_query</span> → everything else; continues down the pipeline.</li>
+</ul>
+<h3>Step 1+ — the data-query cascade (in priority order)</h3>
+<ol>
+  <li><strong>Year comparison</strong> ("2025 vs 2026 GMV") → <code>handle_year_comparison</code>.</li>
+  <li><strong>Merchant onboarding</strong> ("new merchants onboarded") → onboarding SQL.</li>
+  <li><strong>GMV-drop diagnosis</strong> ("why did GMV drop between A and B") → per-merchant mover analysis.</li>
+  <li><strong>Active / non-transacting merchants</strong> by channel → dedicated merchant SQL.</li>
+  <li><strong>Merchant type</strong> (IPG-only / POS-only / both).</li>
+  <li><strong>Analytical / bucket</strong> (cohorts, activity buckets).</li>
+  <li><strong>Transaction status</strong> (approved / declined / abandoned / cancelled).</li>
+  <li><strong>Explicit time-series</strong> (grain + metric, e.g. "monthly GMV 2025") → IPG+POS in parallel, merged.</li>
+  <li><strong>Period overview / dashboard</strong> ("how was June", "give an overview") → <code>handle_period_overview</code>.</li>
+  <li><strong>Month comparison / anomaly</strong> ("does any month stand out") → overview path, full year.</li>
+  <li><strong>Top-N merchants</strong> → <code>handle_top_merchants</code>.</li>
+  <li><strong>Combined single-period</strong> (channel "both" + gmv/volume/revenue) → <code>handle_combined_query</code> (runs IPG + POS, sums).</li>
+  <li><strong>Fallback</strong> → cached SQL → <code>generate_sql</code> → generic LLM SQL.</li>
+</ol>
+<div class="callout">
+  <strong>Why so many branches?</strong> Each branch maps a class of business question to SQL whose numbers have been
+  validated against Power BI. The cascade is effectively a hand-built intent router that keeps the financial math correct.
+</div>
+<h3><code>analyze_intent()</code> — the structured read of a question</h3>
+<p>Returns a dict with: <code>type</code> (gmv / revenue / mdr / volume / count / pos / schema / generic), <code>metric</code>,
+<code>date_start</code>/<code>date_end</code>, <code>currency_id</code>, <code>time_grain</code> (day/week/month), and POS routing fields
+(<code>channel</code>, <code>pos_metric</code>). POS is auto-detected even without the word "pos" (e.g. "DFCC revenue").</p>
+
+<!-- ============ 9. SQL ============ -->
+<h2 id="sql">9. SQL generation strategy</h2>
+<p>Three tiers, tried in order of trust:</p>
+<table>
+  <tr><th>Tier</th><th>Mechanism</th><th>When used</th></tr>
+  <tr><td><span class="pill green">1. Templates</span></td><td>Hand-written builders (<code>build_gmv_sql</code>, <code>build_revenue_sql</code>, <code>build_pos_*</code>, time-series builders)</td><td>All core financial metrics. Numbers are Power-BI verified.</td></tr>
+  <tr><td><span class="pill orange">2. LLM-refined</span></td><td><code>build_base_sql_candidates</code> → <code>refine_sql_with_llm</code></td><td>Question close to a template but needs adjustment.</td></tr>
+  <tr><td><span class="pill grey">3. Generic LLM</span></td><td><code>build_generic_sql</code> (full schema in prompt)</td><td>Last-resort, for questions no template covers.</td></tr>
+</table>
+<h3>Core domain formulas baked into templates</h3>
+<ul>
+  <li><strong>IPG GMV</strong> = sum of approved (<code>payment_status_id = 2</code>) order amounts in <code>tbl_order</code>, currency-filtered.</li>
+  <li><strong>IPG Revenue</strong> = GMV × (merchant_rate − bank_rate) / 100 — the margin WEBXPAY keeps.</li>
+  <li><strong>POS GMV / Revenue</strong> = from <code>tbl_pos_transactions</code>; revenue = <code>t.mdr_rate − cost_rate</code> (DFCC = provider 6, HNB = provider 5).</li>
+  <li><strong>Volume</strong> = count of approved transactions.</li>
+  <li><strong>Combined</strong> = IPG + POS run separately then summed (never a single naive join).</li>
+</ul>
+<div class="callout good">
+  These definitions mirror <code>dax_measures.py</code> (the Power BI DAX library) so the chatbot's answers match the
+  official dashboards.
+</div>
+
+<!-- ============ 10. INSIGHTS ============ -->
+<h2 id="insights">10. Insight &amp; answer generation</h2>
+<ul>
+  <li><strong><code>build_short_answer()</code></strong> — for simple single-number results, builds a deterministic sentence directly from the rows (no LLM, no risk of made-up numbers).</li>
+  <li><strong><code>generate_insights()</code></strong> — for richer results, sends a <em>compacted</em> sample of rows to Gemini for a narrative summary. <code>reasoning_effort="none"</code> keeps it fast.</li>
+  <li><strong><code>_compute_result_facts()</code></strong> — computes superlatives (highest/lowest/peak) and coverage over the <em>full</em> result set, then feeds those facts to the LLM so it can't get them wrong from a truncated sample.</li>
+</ul>
+<div class="callout warn">
+  <strong>No-fabrication guardrail:</strong> the answer layer is built so the bot never invents numbers and never
+  refers to "the data you shared" — figures always come from the SQL result, and a sanitizer fixes the bot's voice.
+</div>
+
+<!-- ============ 11. FEEDBACK ============ -->
+<h2 id="feedback">11. Feedback, caching &amp; self-correction loop</h2>
+<div class="flow">
+  User clicks 👍 / 👎  ──►  POST /feedback  ──►  append to feedback_log.json
+                                                       │
+        ┌──────────────────────────────────────────────┼───────────────────────────────────────┐
+        ▼                                                ▼                                         ▼
+  get_cached_sql()                          is_known_wrong()                        load_wrong_feedback()
+  reuse SQL from a 👍                       skip heavy path / regenerate            inject "past mistakes" into
+  near-identical question                   for a 👎 near-match                      the LLM prompt to avoid repeats
+</div>
+<ul>
+  <li><strong>Positive feedback</strong> → <code>get_cached_sql()</code> reuses that SQL for near-identical future questions (word-overlap similarity ≥ 0.72), skipping LLM generation entirely — faster and consistent.</li>
+  <li><strong>Negative feedback</strong> → <code>is_known_wrong()</code> makes the router avoid the previously-wrong path, and <code>load_wrong_feedback()</code> warns the LLM not to repeat the bad SQL.</li>
+  <li><code>query_cache.sqlite3</code> / <code>summary_mart.sqlite3</code> are local cache/precompute stores for speeding up repeated queries.</li>
+</ul>
+
+<!-- ============ 12. FRONTEND ============ -->
+<h2 id="frontend">12. Frontend — <code>static/</code></h2>
+<p>No framework, no build step — one big <code>index.html</code> with embedded CSS/JS plus Chart.js from a CDN.</p>
+<ul>
+  <li><strong>Auth bootstrap:</strong> checks <code>/api/me</code>; unauthenticated users are redirected to <code>login.html</code>.</li>
+  <li><strong>Chat &amp; history:</strong> conversations are stored per-user via <code>/api/chat-sessions</code> with last-write-wins sync; history is listed in a sidebar.</li>
+  <li><strong>Rendering an answer:</strong> shows the <code>insights</code> prose, a data <strong>table</strong> from <code>result</code>, and the <code>sql</code> used (collapsible).</li>
+  <li><strong>Auto-charts:</strong> <code>buildChartConfig()</code> inspects the result columns and auto-draws a Chart.js chart — including a <strong>dual-axis</strong> view for money-vs-count series — with bar/line toggles. Plain merchant-name lists are detected and skipped (no chart).</li>
+  <li><strong>Feedback buttons:</strong> 👍/👎 post to <code>/feedback</code>, feeding the learning loop above.</li>
+  <li><code>users.html</code> — admin-only screen to create users and toggle <code>is_active</code>.</li>
+</ul>
+
+<!-- ============ 13. DOMAIN ============ -->
+<h2 id="domain">13. Domain glossary &amp; business rules</h2>
+<table>
+  <tr><th>Term</th><th>Meaning</th></tr>
+  <tr><td><strong>IPG</strong></td><td>Internet Payment Gateway — online card payments, stored in <code>tbl_order</code>.</td></tr>
+  <tr><td><strong>POS</strong></td><td>Point of Sale — physical terminals, stored in <code>tbl_pos_transactions</code>. Providers: DFCC = 6, HNB = 5.</td></tr>
+  <tr><td><strong>GMV</strong></td><td>Gross Merchandise Value — total transaction amount processed.</td></tr>
+  <tr><td><strong>Revenue</strong></td><td>WEBXPAY's margin = GMV × (merchant_rate − bank/cost rate) / 100.</td></tr>
+  <tr><td><strong>MDR</strong></td><td>Merchant Discount Rate — the fee % charged to merchants.</td></tr>
+  <tr><td><strong>Volume</strong></td><td>Count of (approved) transactions.</td></tr>
+  <tr><td><strong>payment_status_id</strong></td><td>1 = Abandoned · 2 = Approved · 3 = Declined · 4 = Cancelled.</td></tr>
+  <tr><td><strong>Currencies</strong></td><td>LKR (id 5), USD (id 2), GBP, EUR, AUD.</td></tr>
+  <tr><td><strong>Active merchant</strong></td><td>Flag-based (<code>is_active</code> in <code>tbl_store</code> + channel tables), not date-based.</td></tr>
+  <tr><td><strong>Non-transacting</strong></td><td>Merchant with zero qualifying transactions in the period (de-dup before void filter).</td></tr>
+</table>
+
+<!-- ============ 14. E2E ============ -->
+<h2 id="e2e">14. End-to-end worked example</h2>
+<p><strong>Question:</strong> <em>"Monthly GMV trend for 2025"</em></p>
+<ol>
+  <li><code>/ask</code> receives the question (user is authenticated).</li>
+  <li><code>classify_question</code> → <code>data_query</code>.</li>
+  <li><code>analyze_intent</code> → <code>type=gmv</code>, <code>time_grain=month</code>, <code>date_start=2025-01-01</code>, <code>date_end=2025-12-31</code>, channel "both".</li>
+  <li>Cascade hits the <strong>explicit time-series</strong> branch → builds <code>build_ipg_timeseries_sql</code> + <code>build_pos_timeseries_sql</code> and runs both <strong>in parallel</strong>.</li>
+  <li><code>run_sql</code> validates each as read-only and executes against MySQL.</li>
+  <li>Rows are merged by month; <code>generate_insights</code> writes the narrative.</li>
+  <li><code>app.py</code> normalizes into <code>{insights, result (12 merged rows), timeseries{grain:"month",ipg,pos}, sql}</code>.</li>
+  <li>Frontend renders the prose, a 12-row table, and a dual-axis monthly chart with bar/line toggle.</li>
+</ol>
+
+<!-- ============ 15. RUN ============ -->
+<h2 id="run">15. How to run &amp; configure</h2>
+<h4>Environment (<code>.env</code>)</h4>
+<pre><code>DB_HOST=...            # MySQL analytics DB
+DB_USER=...
+DB_PASSWORD=...
+DB_NAME=...
+GEMINI_API_KEY=...     # Google Gemini key (OpenAI-compatible endpoint)
+GEMINI_MODEL=gemini-2.5-flash
+FLASK_SECRET_KEY=...   # MUST set a strong value in production
+SESSION_COOKIE_SECURE=true   # when served over HTTPS
+PORT=5000</code></pre>
+<h4>Run</h4>
+<pre><code># from the project root
+python -m venv venv
+venv\Scripts\activate
+pip install -r requirements.txt   # flask, openai, mysql-connector-python, python-dotenv
+python app.py                     # serves http://localhost:5000</code></pre>
+<p class="small">First visit → register the first account (auto-admin) → start asking questions.</p>
+
+<!-- ============ 16. EXTEND ============ -->
+<h2 id="extend">16. How to extend / maintenance notes</h2>
+<ul>
+  <li><strong>New metric or question type?</strong> Add a <code>build_*_sql()</code> template and wire a branch into the cascade in <code>handle_user_question()</code> (place it before any broader branch that would otherwise catch it).</li>
+  <li><strong>Numbers wrong vs. Power BI?</strong> Compare the template's formula against the matching measure in <code>dax_measures.py</code> — that file is the spec.</li>
+  <li><strong>Schema changed?</strong> Regenerate <code>schema.txt</code> so the LLM (and generic SQL fallback) sees the new tables/columns.</li>
+  <li><strong>Switching LLM provider?</strong> Only the <code>client = OpenAI(...)</code> block and <code>CHAT_MODEL</code> in <code>gpt_helpers.py</code> need changing — everything else uses the OpenAI-compatible interface.</li>
+  <li><strong>Security:</strong> set a real <code>FLASK_SECRET_KEY</code>, enable <code>SESSION_COOKIE_SECURE</code>, keep the read-only SQL guard intact, and never expose write credentials to <code>db.py</code>.</li>
+  <li><strong>Watch-outs:</strong> the routing cascade is order-sensitive; keyword lists are broad by design — test new branches against existing question types to avoid regressions. The feedback loop is similarity-based, so very different questions with overlapping words can occasionally cross-match.</li>
+</ul>
+
+<hr>
+<p class="footer-note">
+  WEBXPAY Analytics Chatbot — Knowledge Transfer document. Generated from a walkthrough of
+  <code>app.py</code>, <code>auth.py</code>, <code>db.py</code>, <code>gpt_helpers.py</code>, <code>schema.txt</code>,
+  <code>dax_measures.py</code> and the <code>static/</code> frontend.
+</p>
+
+</body>
+</html>
