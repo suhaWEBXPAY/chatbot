@@ -342,6 +342,25 @@ status counts, payment gateways, currencies, terminals/POS machines, order-level
 periods outside the coverage dates above. State in your answer that mart data runs through
 its coverage end date.
 
+Example — TOP-N MERCHANTS WITH MONTHLY BREAKDOWN (copy this shape; a flat join here
+fans out and once inflated one merchant to an impossible Rs 5.8B/month):
+  WITH m AS (
+    SELECT store_id, substr(activity_date,1,7) AS ym, SUM(gmv) AS g, 0 AS p
+    FROM ipg_daily_gmv WHERE activity_date >= '2025-07-01' GROUP BY store_id, ym
+    UNION ALL
+    SELECT store_id, substr(activity_date,1,7), 0, SUM(valid_sale_amount)
+    FROM pos_daily_activity WHERE activity_date >= '2025-07-01' GROUP BY store_id, substr(activity_date,1,7)
+  ),
+  top_stores AS (
+    SELECT store_id FROM m GROUP BY store_id ORDER BY SUM(g + p) DESC LIMIT 20
+  )
+  SELECT d.merchant_name, m.ym AS month,
+         ROUND(SUM(m.g),2) AS ipg_gmv_lkr, ROUND(SUM(m.p),2) AS pos_gmv_lkr,
+         ROUND(SUM(m.g)+SUM(m.p),2) AS combined_gmv_lkr
+  FROM m JOIN store_dim d ON d.store_id = m.store_id
+  WHERE m.store_id IN (SELECT store_id FROM top_stores)
+  GROUP BY d.merchant_name, m.ym ORDER BY d.merchant_name, m.ym
+
 Single-RM GMV (resolve the name FIRST, then reuse the two-subquery pattern):
   1. SELECT DISTINCT rm_name FROM store_dim WHERE rm_name LIKE '%pram%'   -- fragment!
   2. same query as the ranking above but with WHERE d.rm_name = '<exact name from step 1>'
@@ -435,6 +454,10 @@ SCHEMA:
 FINAL-ANSWER RULES:
 - Every number/name you state MUST come from query results you saw. NEVER estimate, extrapolate
   or invent values. If the data cannot answer, say exactly what is missing.
+- Do NOT sum/average subgroups by hand in your answer (e.g. one merchant's 12-month total
+  from its monthly rows) — hand-computed figures fail the grounding check. If a subgroup
+  total is worth stating, compute it IN SQL first; otherwise describe the pattern in words
+  ("consistently around Rs 8-9M/month") and quote individual row values only.
 - COUNTS: never state a count/total you did not compute with COUNT(*)/SUM() in a query.
   Do not count returned rows by eye, and never repurpose an ID value from a lookup row as
   if it were a count. If asked "how many X", one of your queries MUST be that COUNT — and
@@ -729,11 +752,12 @@ def _run_agent(question: str, sql_executor, history=None) -> dict | None:
                           # row counts, small aggregate results, COUNT-like columns
     t0 = time.monotonic()
 
+    parse_failures = 0
     for _turn in range(_MAX_TURNS):
         resp = _chat(
             model=_MODEL,
             temperature=0,
-            max_tokens=3000,
+            max_tokens=5000,
             reasoning_effort="none",  # disable Gemini thinking; else it eats the token budget
             response_format={"type": "json_object"},
             messages=messages,
@@ -743,9 +767,18 @@ def _run_agent(question: str, sql_executor, history=None) -> dict | None:
         messages.append({"role": "assistant", "content": raw})
 
         if act is None:
+            # A huge final table once overflowed max_tokens -> broken JSON on every
+            # retry -> the whole (correct!) result was thrown away. After 2 failures,
+            # stop retrying and salvage the rows below.
+            parse_failures += 1
+            if parse_failures >= 2 and isinstance(last_rows, list) and last_rows:
+                break
             messages.append({"role": "user",
-                             "content": "Reply with ONE valid JSON object exactly as instructed."})
+                             "content": "Reply with ONE valid JSON object exactly as instructed. "
+                                        "Keep the answer SHORT — the result table is already "
+                                        "shown to the user; summarize only the top entries."})
             continue
+        parse_failures = 0
 
         if act.get("action") == "final" or (act.get("answer") and not act.get("sql")):
             answer = _sanitize_voice((act.get("answer") or "").strip())
@@ -864,6 +897,22 @@ def _run_agent(question: str, sql_executor, history=None) -> dict | None:
                     "you have.")
         messages.append({"role": "user", "content": obs})
 
-    # Turn budget exhausted without a final answer.
+    # Turn/parse budget exhausted without a parseable final answer. If real rows came
+    # back, SALVAGE them with a deterministic summary — the UI shows the table, and
+    # returning None here once discarded a correct 240-row result and let a slow,
+    # wrong-shaped legacy handler answer instead.
+    if isinstance(last_rows, list) and last_rows:
+        print("[agent_engine] budget exhausted — salvaging last result rows")
+        answer = _deterministic_summary(last_rows)
+        return {
+            "question": question,
+            "sql": last_sql,
+            "raw_result": last_rows[:_RESULT_ROWS],
+            "answer": answer,
+            "insights": answer,
+            "response_type": "data_query",
+            "engine": "agent",
+            "agent_steps": steps,
+        }
     print("[agent_engine] turn budget exhausted without final answer")
     return None

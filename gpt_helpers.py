@@ -4829,6 +4829,14 @@ ranking for June 2026), new message "now find for ipg and pos both" ->
 "Which RM had the best approved sales in June 2026, combining both IPG and POS
 channels?" — NOT a generic channel total, and NOT a different period.
 
+FORMATTING FOLLOW-UPS ("give it in a detailed manner", "present this properly",
+"in a proper/nice/neat manner", "make it clearer") are kind=data: rewrite them as the
+COMPLETE previous data question — keep EVERY part of it (subject, period, filters, and
+especially any breakdown like monthly/per-merchant/seasonality) — with a presentation
+note appended (e.g. "presented as a clearly structured table"). NEVER shorten the
+original question to just its headline (a rewrite that dropped 'monthly breakdown'
+once turned a co-marketing seasonality analysis into a plain top-20 totals list).
+
 SPELLING CORRECTIONS: when the user re-supplies or corrects a name ("pramoda",
 "the name is pramoda"), the rewritten question MUST use the user's LATEST spelling
 verbatim — NEVER carry forward an earlier variant from the conversation (a previous
@@ -5855,11 +5863,29 @@ def handle_user_question(question: str, sql_executor, history=None):
 
     # ── Step 0d: top-N merchants by GMV — instant from the local mart ──────
     # The live-MySQL version of this ranking timed out ("Top 10 merchants by GMV").
+    # SKIP when the question wants a per-month/seasonal breakdown — this handler only
+    # returns period TOTALS, and it once hijacked a follow-up to a co-marketing monthly
+    # analysis, silently dropping the monthly breakdown the user asked for.
     _top_m = re.search(r"(?i)\btop\s+(\d{1,3})?\s*merchants?\b", question)
-    if _top_m and not any(w in question.lower() for w in ("revenue", "mdr", "volume", "count")):
+    _wants_breakdown = re.search(
+        r"(?i)\bmonthly\b|\bmonth[- ]by[- ]month\b|\bper month\b|\beach month\b|"
+        r"\bmonth[- ]wise\b|\bbreakdown\b|\bseasonal|\bmom\b|\byoy\b|\btrend\b",
+        question)
+    if (_top_m and not _wants_breakdown
+            and not any(w in question.lower() for w in ("revenue", "mdr", "volume", "count"))):
         _fast = handle_top_merchants_mart(question, _top_m.group(1))
         if _fast:
             return _fast
+    if _top_m and _wants_breakdown:
+        # Ranking + per-month breakdown = agent territory (mart, one grouped query);
+        # the legacy path has no handler for this shape.
+        try:
+            from agent_engine import answer_with_agent as _awa_tb
+            _tb_out = _awa_tb(question, sql_executor, history=history)
+            if isinstance(_tb_out, dict) and _tb_out.get("answer"):
+                return _tb_out
+        except Exception as _tb_e:
+            print(f"[handle_user_question] top-breakdown agent unavailable: {_tb_e}")
 
     # ── Step 1: multi-year comparison (e.g. "2025 vs 2026 GMV") ──────────
     # Check this BEFORE overview mode so "2025 vs 2026" doesn't get swallowed
