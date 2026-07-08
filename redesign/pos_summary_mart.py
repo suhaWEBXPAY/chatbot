@@ -90,6 +90,7 @@ SELECT s.store_id,
        MAX(s.free_trail)               AS free_trail,
        MAX(DATE(s.date_registered))    AS date_registered,
        MAX(wau.name)                   AS rm_name,
+       MAX(cc.description)             AS mcc,
        MAX(CASE WHEN ig.store_id IS NOT NULL THEN 1 ELSE 0 END) AS has_ipg,
        MAX(CASE WHEN pm.store_id IS NOT NULL THEN 1 ELSE 0 END) AS has_pos
 FROM {DB}.tbl_store s
@@ -97,6 +98,7 @@ LEFT JOIN merchant_db.wbx_merchants wm        ON wm.merchant_id = s.store_id
 LEFT JOIN merchant_db.wbx_merchant_signups wms ON wms.merchant_id = wm.id
 LEFT JOIN merchant_db.wbx_live_rms wlr        ON wlr.id = wms.live_rm_id
 LEFT JOIN merchant_db.wbx_admin_users wau     ON wau.id = wlr.admin_user_id
+LEFT JOIN {DB}.tbl_category_code cc           ON cc.category_code_id = s.category_code_id
 LEFT JOIN (SELECT DISTINCT store_id FROM {DB}.tbl_store_payment_gateway_2
            WHERE is_active = 1) ig ON ig.store_id = s.store_id
 LEFT JOIN (SELECT DISTINCT store_id FROM {DB}.tbl_pos_store_bank_mid
@@ -116,6 +118,7 @@ def _sqlite():
             free_trail INTEGER,
             date_registered TEXT,
             rm_name TEXT,
+            mcc TEXT,
             has_ipg INTEGER DEFAULT 0,
             has_pos INTEGER DEFAULT 0
         )""")
@@ -125,6 +128,11 @@ def _sqlite():
             conn.execute(f"ALTER TABLE store_dim ADD COLUMN {_col} INTEGER DEFAULT 0")
         except Exception:
             pass  # already exists
+    # add MCC (merchant category) when upgrading a store_dim built before it
+    try:
+        conn.execute("ALTER TABLE store_dim ADD COLUMN mcc TEXT")
+    except Exception:
+        pass  # already exists
     conn.execute("""
         CREATE TABLE IF NOT EXISTS pos_daily_activity (
             store_id INTEGER NOT NULL,
@@ -225,8 +233,8 @@ def refresh_store_dim() -> int:
         sconn.executemany(
             "INSERT OR REPLACE INTO store_dim "
             "(store_id, merchant_name, registered_name, is_active, free_trail, "
-            " date_registered, rm_name, has_ipg, has_pos) VALUES (?,?,?,?,?,?,?,?,?)",
-            [(r[0], r[1], r[2], r[3], r[4], str(r[5]) if r[5] else None, r[6], r[7], r[8])
+            " date_registered, rm_name, mcc, has_ipg, has_pos) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            [(r[0], r[1], r[2], r[3], r[4], str(r[5]) if r[5] else None, r[6], r[7], r[8], r[9])
              for r in rows],
         )
     sconn.close()

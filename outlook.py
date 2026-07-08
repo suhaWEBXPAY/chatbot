@@ -37,8 +37,19 @@ _FUTURE_PAT = re.compile(
     r"\bnext year\b.{0,30}\b(?:look|be|reach)|\b(?:will|would|could)\b.{0,40}\b(?:be|reach|grow|look like)\b.{0,30}\b(?:year|future|20\d\d)\b")
 
 
+# SHORT-HORIZON projections ("GMV projection for TODAY", "this week", "end of day",
+# "this month") are RUN-RATE questions, not multi-year outlooks — the agent computes
+# them from actuals + historical pace. This module once hijacked "projection for
+# today" and returned the canned 2026-2031 scenario table three times in a row.
+_SHORT_HORIZON_PAT = re.compile(
+    r"(?i)\btoday\b|\btonight\b|\bend of (?:the )?day\b|\beod\b|\btomorrow\b|"
+    r"\bthis (?:week|month)\b|\bby (?:month|week)[- ]end\b|\brest of (?:the )?(?:day|week|month)\b")
+
+
 def is_outlook_question(question: str) -> bool:
     q = question or ""
+    if _SHORT_HORIZON_PAT.search(q):
+        return False
     if _HORIZON_PAT.search(q):
         return True
     return bool(_FUTURE_PAT.search(q))
@@ -124,10 +135,17 @@ def _gather_facts(sql_executor) -> dict | None:
         facts["run_rate_months_used"] = f"{ytd_months[0]}..{ytd_months[-1]}"
 
     # Merchant base: onboarding per year (small table, fast) + active count.
+    # CANONICAL onboarding definition — must match gpt_helpers.build_merchant_onboarding_sql
+    # (COALESCE(credit_review_approved_date, date_registered), free_trail=0, no is_active):
+    # this figure gets quoted in outlook/advisor/web answers and used to contradict the
+    # direct "how many merchants onboarded this year" answer (471 vs 119 in two chats).
     try:
         rows = sql_executor(
-            "SELECT YEAR(date_registered) AS y, COUNT(*) AS n FROM tbl_store "
-            "WHERE date_registered IS NOT NULL GROUP BY YEAR(date_registered) ORDER BY y")
+            "SELECT YEAR(COALESCE(credit_review_approved_date, date_registered)) AS y, "
+            "COUNT(*) AS n FROM tbl_store "
+            "WHERE COALESCE(credit_review_approved_date, date_registered) IS NOT NULL "
+            "AND free_trail = 0 "
+            "GROUP BY YEAR(COALESCE(credit_review_approved_date, date_registered)) ORDER BY y")
         if isinstance(rows, list):
             per_year = {int(r["y"]): int(r["n"]) for r in rows if r.get("y")}
             facts["merchants_onboarded_per_year"] = {

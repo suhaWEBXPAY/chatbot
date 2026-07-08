@@ -72,6 +72,8 @@ agent = everything else — any question that needs looking things up or multi-s
 - metric questions with a NON-STANDARD filter (by RM, by city, by category, by bank, by card type...)
 - judgment/quality questions ("good merchants", "performing well", "worth keeping"),
   "analyze X and suggest improvements" (compute the real numbers, then advise)
+- LOST / CHURNED / LAPSED merchants, attrition, "merchants we lost", "who stopped
+  transacting this year vs last" (period-over-period set difference — multi-hop)
 - questions about a specific named merchant/store
 - customers, banks, categories, countries, currencies as entities
 - anything vague, multi-hop, or not clearly covered by the metric list above
@@ -91,6 +93,8 @@ Examples:
 "which city has the most merchants" -> agent
 "what is keells' total sales this year" -> agent
 "which rm onboarded the most merchants in 2026" -> agent
+"how many merchants have we lost in 2026 who transacted in 2025" -> agent
+"which merchants churned this year" -> agent
 
 Reply with one word only."""
 
@@ -200,10 +204,71 @@ POS (physical card machine) transactions:
 Merchants / stores:
 - tbl_store s ; display name = s.doing_business_name (fallback s.registered_name).
 - active merchant = s.is_active = 1 AND s.free_trail = 0 (note the column really is
-  spelled "free_trail"). Onboarding/registration date = s.date_registered
-  (s.active_date = when they went live).
-- a merchant has POS if it appears in tbl_pos_transactions (or tbl_pos_store_bank_mid);
-  has IPG if it has rows in tbl_order.
+  spelled "free_trail"). s.active_date = when they went live.
+- ONBOARDED (canonical, ALWAYS use exactly this so every path gives the same count):
+  onboard date = COALESCE(s.credit_review_approved_date, s.date_registered);
+  "onboarded in <period>" = that date inside the period AND s.free_trail = 0.
+  Onboarding is an EVENT — do NOT add is_active (a merchant deactivated later was
+  still onboarded) and do NOT require presence in a channel table unless the user
+  explicitly asks for IPG-only / POS-only onboarding.
+- CHANNEL / PRODUCT TYPE of a merchant (canonical, config-based — matches the Power BI
+  product-type chart): has IPG = appears in tbl_store_payment_gateway_2 with is_active=1;
+  has POS = appears in tbl_pos_store_bank_mid with is_active=1. The four MUTUALLY
+  EXCLUSIVE classes are IPG-only, POS-only, IPG-and-POS, and NONE (no active channel
+  setup — a real category, never drop it; "none type" merchants are typically newly
+  onboarded and not yet configured). Any "how many are ipg/pos/both/none" style
+  question = count these four classes so they sum to the total. For transaction
+  ACTIVITY questions (has the merchant transacted), use tbl_order / tbl_pos_transactions
+  instead and say that's activity, not setup.
+- LOST / CHURNED / LAPSED / ATTRITION merchant (canonical, activity-based definition —
+  ALWAYS use exactly this, so the answer is the same every time): a merchant that had
+  AT LEAST ONE transaction (IPG approved order OR valid POS sale) in a PRIOR period but
+  ZERO transactions in the CURRENT period. Do NOT use the is_active/free_trail flags for
+  "lost" — those are a separate 'deactivated' concept and give a different number; if the
+  user explicitly asks about deactivation/flagged-inactive, answer that separately and say so.
+  PERIODS — infer them from the phrasing, don't force one default: named years ("lost in
+  2026 who transacted in 2025") -> those calendar years; "currently churning / churning
+  now / who is churning" with NO period -> recent rolling windows (e.g. transacted in the
+  6 months before the last 60 days but zero in the last 60 days) — CHOOSE sensible windows,
+  STATE them in one short line, and offer to recompute with different windows. "how many"
+  -> a COUNT; "which/list/show/who" -> the merchant rows, ranked by their PRIOR-period GMV
+  (what we lost, biggest first), and note how many are still flagged active
+  (is_active=1 AND free_trail=0) as win-back candidates. Do NOT open the answer by
+  reciting the definition — lead with the finding; put the definition/window in the
+  assumptions line at the end. Compute it in ONE fast mart query,
+  e.g. lost in 2026 that transacted in 2025:
+    WITH prior_txn AS (
+      SELECT store_id FROM ipg_daily_gmv WHERE activity_date>='2025-01-01' AND activity_date<'2026-01-01' AND txn_count>0
+      UNION SELECT store_id FROM pos_daily_activity WHERE activity_date>='2025-01-01' AND activity_date<'2026-01-01' AND valid_sale_count>0),
+    cur_txn AS (
+      SELECT store_id FROM ipg_daily_gmv WHERE activity_date>='2026-01-01' AND txn_count>0
+      UNION SELECT store_id FROM pos_daily_activity WHERE activity_date>='2026-01-01' AND valid_sale_count>0),
+    lost AS (SELECT store_id FROM prior_txn EXCEPT SELECT store_id FROM cur_txn),
+    prior_gmv AS (
+      SELECT store_id, SUM(g) g FROM (
+        SELECT store_id, SUM(gmv) g FROM ipg_daily_gmv WHERE activity_date>='2025-01-01' AND activity_date<'2026-01-01' GROUP BY store_id
+        UNION ALL SELECT store_id, SUM(valid_sale_amount) FROM pos_daily_activity WHERE activity_date>='2025-01-01' AND activity_date<'2026-01-01' GROUP BY store_id
+      ) GROUP BY store_id)
+    SELECT d.merchant_name, d.rm_name, d.mcc, ROUND(COALESCE(g.g,0),2) AS prior_gmv_lkr,
+           CASE WHEN d.is_active=1 AND d.free_trail=0 THEN 1 ELSE 0 END AS still_flagged_active
+    FROM lost l JOIN store_dim d ON d.store_id=l.store_id
+    LEFT JOIN prior_gmv g ON g.store_id=l.store_id
+    ORDER BY prior_gmv_lkr DESC
+  (for "how many", wrap as SELECT COUNT(*) FROM lost). This is a mart_sql query.
+- Threshold follow-ups on lost merchants ("more than 10 transactions", "at least 2"):
+  compute the prior-period transaction count EXACTLY like this and filter it —
+    prior_counts AS (
+      SELECT store_id, SUM(n) AS txns FROM (
+        SELECT store_id, SUM(txn_count) AS n FROM ipg_daily_gmv
+        WHERE activity_date>='<prior_start>' AND activity_date<'<prior_end>' GROUP BY store_id
+        UNION ALL
+        SELECT store_id, SUM(valid_sale_count) FROM pos_daily_activity
+        WHERE activity_date>='<prior_start>' AND activity_date<'<prior_end>' GROUP BY store_id
+      ) GROUP BY store_id)
+  then HAVING/WHERE txns > N or >= N as asked. NEVER count table ROWS as transactions —
+  the daily tables are pre-aggregated (one row = one store-day), so COUNT(*) counts
+  ACTIVE DAYS, not transactions. Sanity: equivalent thresholds MUST give the same
+  count ("at least 2" == "more than 1"); if your two runs disagree, the query is wrong.
 
 Relationship Managers (RM = the salesperson who onboards/brings in merchants):
 - RM names live in merchant_db.wbx_admin_users.name. Authoritative join chain from a store:
@@ -268,7 +333,23 @@ Payment gateways (IPG "gateway-wise" analysis — use EXACTLY this chain):
 
 Judgment / quality questions ("good merchants", "performing well"):
 - pick measurable criteria (e.g. total approved GMV since onboarding, transacting recently,
-  is_active), compute them, and STATE the criteria you used in the answer."""
+  is_active), compute them, and STATE the criteria you used in the answer.
+
+SHORT-HORIZON PROJECTIONS ("GMV projection for today", "this week", "this month",
+"end of day") — compute a run-rate estimate, NEVER refuse and NEVER answer with
+multi-year scenarios:
+- today: (1) today's actual so far — live MySQL, cheap (IPG: approved orders with
+  p.date_time_transaction >= CURDATE(); POS: sale/amex LKR with transaction_date =
+  CURDATE()); (2) typical full-day GMV — mart, average of the same weekday over the
+  last 4 weeks per channel; (3) if you can, estimate the fraction of a typical day
+  completed by the current time from those same weekdays' time-of-day columns and
+  scale today's so-far; otherwise present "so far Rs X; a typical <weekday> does
+  Rs Y full-day" and give the resulting rough end-of-day estimate.
+- this week/month: actual-so-far (mart) + avg daily GMV x remaining days.
+- The end-of-period estimate can NEVER be lower than the actual already recorded so
+  far — if the typical-day average is below today's so-far, the day is running ahead
+  of normal: say so and estimate at or above the so-far figure.
+Always label it an ESTIMATE from historical pace and show the inputs you used."""
 
 
 def _learned_rules() -> str:
@@ -315,12 +396,30 @@ Mart tables (SQLite — use substr()/strftime(), julianday(); NOT MONTH()/DATE_F
     void-deduped POS sales per store per day (validated pair-elimination logic);
     valid_sale_amount = POS GMV in LKR. Coverage: {cov.get('pos_from')} to {cov.get('pos_to')}.
 - store_dim(store_id, merchant_name, registered_name, is_active, free_trail,
-    date_registered, rm_name, has_ipg, has_pos)
+    date_registered, rm_name, mcc, has_ipg, has_pos)
     EXACTLY ONE row per store incl. the resolved Relationship Manager ({cov.get('stores')} stores).
+    mcc = merchant category (MCC description, e.g. 'Eating Places and Restaurants'). USE THIS
+    for any category/MCC/sector question — join it to the daily GMV tables IN THE MART; never
+    reach into the live tbl_category_code (a cross-database join with the mart is impossible and
+    burns your whole query budget).
     has_ipg / has_pos = 1 when the store has an active IPG gateway / POS MID ("subscriptions").
     Merchant counts per RM, channel-subscription counts, active-merchant counts: ALWAYS from
     store_dim (COUNT(*)/SUM(has_ipg)/SUM(has_pos) GROUP BY rm_name) — never from live
     merchant_db tables.
+    MCC-by-GMV ranking (e.g. "which MCCs to focus on based on last month") is ONE mart query:
+      SELECT d.mcc,
+             ROUND(SUM(COALESCE(i.g,0)),2) AS ipg_gmv_lkr,
+             ROUND(SUM(COALESCE(p.a,0)),2) AS pos_gmv_lkr,
+             ROUND(SUM(COALESCE(i.g,0))+SUM(COALESCE(p.a,0)),2) AS combined_gmv_lkr
+      FROM store_dim d
+      LEFT JOIN (SELECT store_id, SUM(gmv) g FROM ipg_daily_gmv
+                 WHERE activity_date >= '<start>' AND activity_date < '<end>' GROUP BY store_id) i
+             ON i.store_id = d.store_id
+      LEFT JOIN (SELECT store_id, SUM(valid_sale_amount) a FROM pos_daily_activity
+                 WHERE activity_date >= '<start>' AND activity_date < '<end>' GROUP BY store_id) p
+             ON p.store_id = d.store_id
+      WHERE d.mcc IS NOT NULL
+      GROUP BY d.mcc HAVING combined_gmv_lkr > 0 ORDER BY combined_gmv_lkr DESC
 
 Example — RM ranking by combined GMV for June 2026, ONE instant query:
   SELECT d.rm_name,
@@ -361,6 +460,14 @@ fans out and once inflated one merchant to an impossible Rs 5.8B/month):
   WHERE m.store_id IN (SELECT store_id FROM top_stores)
   GROUP BY d.merchant_name, m.ym ORDER BY d.merchant_name, m.ym
 
+MULTI-PERIOD performance ("how did X perform in 2025 AND 2026", "this year vs last"):
+run ONE query PER period — repeat the single-period pattern above with different date
+bounds (you have the query budget) — or use per-period pre-aggregated subqueries. NEVER
+write one combined query that joins multiple periods' daily rows together: a combined
+join once fanned out and reported an RM at Rs 11.6B for a half-year in which the WHOLE
+COMPANY did Rs 9.95B (the true figure was Rs 317M — 36x inflation). SANITY before
+answering: each period figure must be below the company total for THAT period.
+
 Single-RM GMV (resolve the name FIRST, then reuse the two-subquery pattern):
   1. SELECT DISTINCT rm_name FROM store_dim WHERE rm_name LIKE '%pram%'   -- fragment!
   2. same query as the ranking above but with WHERE d.rm_name = '<exact name from step 1>'
@@ -370,6 +477,10 @@ Percentage-of-total / shares: compute them IN the SQL so the figures are grounde
 (SQLite window functions are supported on the mart).
 
 MART CAVEATS (each of these has caused a WRONG ANSWER before — follow them exactly):
+- The daily tables are PRE-AGGREGATED: one ipg_daily_gmv row = one store-DAY; one
+  pos_daily_activity row = one store-day-PROVIDER. A store's transaction count over a
+  period is SUM(txn_count) / SUM(valid_sale_count) — NEVER COUNT(*) of rows (that
+  counts active days and once produced a wrong threshold-filter count).
 - NEVER join ipg_daily_gmv and pos_daily_activity directly to store_dim in one flat join:
   pos_daily_activity has MULTIPLE rows per store/day (one per provider), so a flat join
   MULTIPLIES the IPG amounts and inflates GMV massively. ALWAYS pre-aggregate each daily
@@ -426,8 +537,13 @@ INVESTIGATION RULES:
    queries total — plan them.
 6. Make the LAST query you run the one whose rows best belong in the user's result table
    (the UI shows those rows alongside your answer).
-7. If a listing returns EXACTLY as many rows as its LIMIT, the true count is probably larger —
-   run a COUNT(*)/aggregate query before stating any total, or say "at least N".
+7. If a listing returns EXACTLY as many rows as its LIMIT (e.g. 200), the true count is almost
+   certainly LARGER — the row count you see is the cap, NOT the total. Before stating any total
+   you MUST run a separate COUNT(*) with the same filters. NEVER write "there are 200 <entities>"
+   off a 200-row capped list. This applies to terse filter follow-ups too ("at least 2", "more
+   than 10", "only those over X") — re-run the COUNT(*) with the new threshold; do not eyeball
+   the list length. Note "at least 2" == "more than 1" — equivalent thresholds must give the
+   SAME count.
 8. Merchant activity lives in BOTH channels: IPG (tbl_order) and POS (tbl_pos_transactions).
    When judging activity, check both — but ALWAYS inside a bounded date window.
 8b. LISTING SHAPE: when the question names entities in the PLURAL with a metric
@@ -462,6 +578,12 @@ FINAL-ANSWER RULES:
   Do not count returned rows by eye, and never repurpose an ID value from a lookup row as
   if it were a count. If asked "how many X", one of your queries MUST be that COUNT — and
   make it the LAST query so the table shown to the user backs up your number.
+- QUESTION SHAPE: "who / which / list / show / give me the ..." questions MUST end with
+  the ranked LIST as the LAST query (that's what fills the user's table) — run any COUNT
+  you want to quote EARLIER. Answering a "who" question with only a count row is wrong.
+- TABLE-CLAIM ACCURACY: anything you say about "the table above/below" must match the
+  rows your LAST query actually returned — never claim it shows 200 merchants when your
+  last query returned a 1-row count.
 - PERIOD HONESTY: today is {today}. If the question's period extends beyond today (e.g. "2026"
   while 2026 is ongoing), the data only covers up to today — describe it as "year-to-date
   (Jan 1 – {today})" and NEVER present a future end date (like December 31) as covered.
@@ -470,10 +592,13 @@ FINAL-ANSWER RULES:
 - You are the company's analytics assistant speaking about OUR database — never say
   "the data you shared/provided".
 - ORGANIZED SUMMARIES, NOT TABLE DUMPS: the UI already shows your last query's rows as a
-  table (and auto-renders a chart for multi-row results). NEVER paste the full result table
-  into your answer. Structure it instead: (1) one-sentence headline answering the question,
-  (2) the top 3-5 entries with their key figures (a SHORT table is fine), (3) notable
-  outliers/anomalies worth attention, (4) a final line with definitions/assumptions/period.
+  table (and auto-renders a chart for multi-row results). NEVER paste result tables into
+  your answer text, and NEVER use markdown pipe tables ("| col | col |") — they render as
+  an unreadable wall of pipes. Structure the answer instead: (1) one-sentence headline
+  answering the question, (2) the top 3-5 entries as a NUMBERED LIST, one per line, e.g.
+  "1. **SRB TRADES** — Rs 109.1M GMV — RM Pramoda Desilva — still flagged active",
+  (3) notable outliers/anomalies worth attention, (4) a final line with
+  definitions/assumptions/period.
 - If the user asks for an infographic/chart/visual: the UI renders an interactive chart
   automatically from your final query's rows — make that last query return the rows worth
   charting, and say the chart is shown above. NEVER say you cannot create visuals.
@@ -579,6 +704,80 @@ def _count_violation(question: str, answer: str, agg_values: list[float]) -> str
             return (f"the count {tok} was never computed by any aggregate query "
                     "(no COUNT(*)/SUM() result or row count matches it)")
     return ""
+
+
+# Row-listing LIMIT the agent is told to use (475) and the frontend result cap (_RESULT_ROWS).
+# A stated total that exactly equals one of these, when the result has exactly that many rows,
+# is almost always the LIMIT misreported as the count.
+_LIMIT_SENTINELS = (200, _RESULT_ROWS)
+_TOTAL_ASSERT_PAT = re.compile(
+    r"(?i)(?:there (?:are|were)|total of|found|a total of|count of|=)\s*\**\s*([\d,]+)"
+    r"|\**\s*([\d,]+)\s*\**\s*(?:merchants?|stores?|customers?|terminals?|machines?|"
+    r"gateways?|rows?|results?|records?|entries)")
+
+
+def _capped_count_violation(answer: str, row_count: int) -> str:
+    """The agent listed a LIMIT-capped set (exactly 200 or _RESULT_ROWS rows) and then
+    stated that cap as a TOTAL ('there are 200 merchants ...'). The true count is larger.
+    Fires regardless of the question wording — catches terse filter follow-ups ('at least
+    2') that don't contain 'how many'. Does NOT fire when the answer also asserts a LARGER
+    figure (e.g. 'total 362, showing the top 200') — that answer already has the real count."""
+    if row_count not in _LIMIT_SENTINELS:
+        return ""
+    t = _DATE_TIME_PAT.sub(" ", answer)
+    asserted = []
+    for m in _TOTAL_ASSERT_PAT.finditer(t):
+        tok = m.group(1) or m.group(2)
+        try:
+            asserted.append(int(tok.replace(",", "")))
+        except (ValueError, AttributeError):
+            continue
+    if not asserted:
+        return ""
+    if row_count in asserted and max(asserted) <= row_count:
+        return (f"the answer states {row_count} as a total, but that is exactly the row LIMIT — "
+                f"the result was capped, so the real count is larger. Run a COUNT(*) with "
+                f"the same filters and state that number instead (keep the capped list as the "
+                f"result table if the user wanted a list)")
+    return ""
+
+
+_LIST_Q_PAT = re.compile(r"(?i)\bwho\b|\bwhich\b|\blist\b|\bshow\b|\bgive me\b|\bname the\b")
+_TABLE_CLAIM_PAT = re.compile(
+    r"(?i)table (?:above|below)?\s*(?:displays|shows|lists|contains)[^.\d]{0,40}?([\d,]+)")
+
+
+def _shape_violations(question: str, answer: str, last_rows) -> str:
+    """Deterministic answer-shape checks (prompt rules alone were ignored):
+    1. NO PIPE TABLES in the answer text — the user explicitly forbade them (they
+       render as an unreadable wall of pipes in the UI).
+    2. A who/which/list question must NOT end with a bare 1-column count row as the
+       result table (the user asked for the list).
+    3. Claims about what "the table shows" must match the actual last-result rows."""
+    problems = []
+    pipe_lines = sum(1 for ln in (answer or "").splitlines() if ln.count("|") >= 3)
+    if pipe_lines >= 3:
+        problems.append("it contains a markdown pipe table — FORBIDDEN in answer text; "
+                        "present the top entries as a numbered list (one per line, "
+                        "name — figures — flags) instead")
+    if (_LIST_Q_PAT.search(question or "") and not _COUNT_Q_PAT.search(question or "")
+            and isinstance(last_rows, list) and len(last_rows) == 1
+            and len(last_rows[0]) == 1):
+        problems.append("the user asked WHO/WHICH (a list) but your LAST query returned "
+                        "only a 1-value count — re-run the ranked LIST query so the "
+                        "result table shows the actual entities")
+    row_n = len(last_rows) if isinstance(last_rows, list) else 0
+    for m in _TABLE_CLAIM_PAT.finditer(answer or ""):
+        try:
+            claimed = int(m.group(1).replace(",", ""))
+        except ValueError:
+            continue
+        if claimed != row_n:
+            problems.append(f"the answer claims the table shows {claimed} rows but the "
+                            f"last query returned {row_n} — describe the table as it "
+                            f"actually is (or run the query that matches the claim)")
+            break
+    return "; ".join(problems)
 
 
 def _grounding_violations(answer: str, allowed: list[float], has_rows: bool) -> str:
@@ -789,9 +988,17 @@ def _run_agent(question: str, sql_executor, history=None) -> dict | None:
             # once emitted a fake "example" RM table with invented values).
             problems = _grounding_violations(answer, grounded_values,
                                              has_rows=bool(last_rows))
-            count_problem = _count_violation(question, answer, agg_values)
+            count_problem = (_count_violation(question, answer, agg_values)
+                             or _capped_count_violation(
+                                 answer, len(last_rows) if isinstance(last_rows, list) else 0))
             if count_problem:
                 problems = f"{problems}; {count_problem}" if problems else count_problem
+            shape_problem = _shape_violations(question, answer, last_rows)
+            if shape_problem:
+                problems = f"{problems}; {shape_problem}" if problems else shape_problem
+                # shape fixes may need one more query (e.g. re-run the LIST last)
+                if not count_problem:
+                    count_problem = shape_problem if "LAST query" in shape_problem else ""
             if problems:
                 print(f"[agent_engine] GROUNDING CHECK FAILED: {problems}")
                 if grounding_retries < 2:

@@ -2152,10 +2152,13 @@ def _active_merchant_filter_type(question: str) -> str:
         or "pos, ipg" in ql
         or "ipg, pos" in ql
     )
+    # NOTE: "active POS and IPG merchants" asks for BOTH channels' numbers (the full
+    # breakdown), NOT only the intersection — mapping it to "both" once answered
+    # "26" when the user wanted per-channel counts. Only an explicit "both" phrase
+    # ("with both", "both channels") means the intersection.
     asks_both_only = any(term in ql for term in [
         "with both", "have both", "has both", "using both",
         "both channels", "both channel", "both pos and ipg", "both ipg and pos",
-        "ipg and pos merchants", "pos and ipg merchants",
     ])
 
     if asks_both_only and not asks_all_channel_classes:
@@ -2658,12 +2661,18 @@ def generate_sql(question: str, schema: str | None = None) -> str:
     if (any(k in ql_gen for k in _mtype_kw) and "transact" not in ql_gen
             and not any(w in ql_gen for w in _mtype_metric_kw)):
         _want_count = any(w in ql_gen for w in ["how many", "count", "total", "number of"])
-        # Detect specific filter
-        if "ipg only" in ql_gen or ("ipg" in ql_gen and "pos" not in ql_gen and "both" not in ql_gen):
+        # Detect specific filter. NOTE: "active POS and IPG merchants" means BOTH
+        # channels' counts (the full breakdown), NOT only the merchants that have both —
+        # mapping it to "both" once answered "26" when the user wanted per-channel counts.
+        # Only an explicit "both" asks for the intersection.
+        if any(w in ql_gen for w in ("none", "neither", "no channel", "without any channel")) \
+                and not ("ipg" in ql_gen and "pos" in ql_gen):
+            _ft = "none"   # ONLY the no-channel class; "ipg, pos, both, none" = full breakdown
+        elif "ipg only" in ql_gen or ("ipg" in ql_gen and "pos" not in ql_gen and "both" not in ql_gen):
             _ft = "ipg"
         elif "pos only" in ql_gen or ("pos" in ql_gen and "ipg" not in ql_gen and "both" not in ql_gen):
             _ft = "pos"
-        elif "both" in ql_gen or ("ipg and pos" in ql_gen) or ("pos and ipg" in ql_gen) or ("ipg or pos" in ql_gen):
+        elif "both" in ql_gen:
             _ft = "both"
         else:
             _ft = "all"
@@ -3276,6 +3285,46 @@ ORDER BY {order_by} ASC;
 """.strip()
 
 
+# Explicit user overrides of the canonical onboarding filters. "don't check free
+# trial" once got routed to the agent (LLM router saw a "non-standard filter"),
+# which invented date_registered-based SQL and contradicted the canonical count —
+# the builder itself must honor these phrasings so the question stays deterministic.
+_ONBOARD_INCLUDE_TRIALS_PAT = re.compile(
+    r"(?i)\b(?:don'?t|do not|no need to|ignore|ignoring|skip|skipping)\b"
+    r".{0,30}\bfree.{0,2}tr(?:ia|ai)ls?\b"
+    r"|\b(?:includ\w*|with|count(?:ing)?|keep(?:ing)?)\b.{0,20}\bfree.{0,2}tr(?:ia|ai)ls?\b")
+_ONBOARD_ACTIVE_PAT = re.compile(r"(?i)\bactive\b")
+
+
+def _onboarding_overrides(question: str) -> tuple[bool, bool]:
+    """(include_trials, active_only) parsed from explicit wording in the question."""
+    q = question or ""
+    return (bool(_ONBOARD_INCLUDE_TRIALS_PAT.search(q)),
+            bool(_ONBOARD_ACTIVE_PAT.search(q)))
+
+
+def _onboarding_status_filter(question: str) -> str:
+    include_trials, active_only = _onboarding_overrides(question)
+    parts = ""
+    if not include_trials:
+        parts += "\n  AND s.free_trail = 0"
+    if active_only:
+        parts += "\n  AND s.is_active = 1"
+    return parts
+
+
+def _onboarding_definition_note(question: str) -> str:
+    """Deterministic methodology line appended to onboarding answers — the insights
+    LLM once claimed a count 'excludes free trials' when the SQL had no such filter."""
+    include_trials, active_only = _onboarding_overrides(question)
+    bits = ["onboard date = credit-review approval date, falling back to registration date"]
+    bits.append("free-trial merchants INCLUDED (as requested)" if include_trials
+                else "free-trial merchants excluded")
+    if active_only:
+        bits.append("only merchants currently flagged active (is_active = 1)")
+    return "_Definition used: " + "; ".join(bits) + "._"
+
+
 def build_merchant_onboarding_sql(question: str, ds: str = None, de: str = None) -> str:
     """
     Merchant onboarding count / list.
@@ -3305,6 +3354,9 @@ def build_merchant_onboarding_sql(question: str, ds: str = None, de: str = None)
         _question_words = _generic_starts | {
             "did", "do", "does", "are", "were", "have", "has", "had", "can", "could",
             "would", "should", "which", "any", "these", "those", "of", "there",
+            # status/quantity adjectives, not names: "active onboarded merchants this
+            # year" once became LIKE '%active%'
+            "active", "inactive", "new", "all", "recent", "recently", "total",
         }
         _looks_like_question = (
             _first_word in _question_words
@@ -3324,7 +3376,6 @@ SELECT
     END AS date_source
 FROM webxpay_master.tbl_store s
 WHERE s.doing_business_name LIKE '%{safe_name}%'
-  AND s.is_active = 1
 ORDER BY onboard_date DESC;
 """.strip()
 
@@ -3334,6 +3385,18 @@ ORDER BY onboard_date DESC;
     else:
         date_filter = "COALESCE(s.credit_review_approved_date, s.date_registered) >= DATE_SUB(CURDATE(), INTERVAL 3 MONTH) AND COALESCE(s.credit_review_approved_date, s.date_registered) < CURDATE()"
 
+    # CANONICAL onboarding definition (must match outlook._gather_facts and the agent
+    # semantic layer, or the same question gives contradictory counts in different
+    # chats): onboarded in period = COALESCE(credit_review_approved_date,
+    # date_registered) in the period AND free_trail = 0. Onboarding is an EVENT —
+    # a merchant deactivated later was still onboarded, so NO is_active filter, and
+    # NO channel-presence requirement unless the user names a channel. (The old
+    # default was is_active=1 + an implicit IPG-only join: "merchants onboarded this
+    # year" returned 119 while every other path said ~465.)
+    # Explicit user overrides ("don't check free trial", "active onboarded") are
+    # honored via _onboarding_status_filter and stated in the definition note.
+    status_filter = _onboarding_status_filter(question)
+
     # Channel BREAKDOWN: "ipg or pos", "ipg vs pos", "by channel", "split" → return
     # IPG / POS / both counts side by side (a merchant can be on both channels, so the
     # columns overlap; total = distinct merchants on either channel).
@@ -3341,14 +3404,20 @@ ORDER BY onboard_date DESC;
         "ipg or pos", "pos or ipg", "ipg vs pos", "pos vs ipg", "ipg / pos",
         "by channel", "channel breakdown", "breakdown by channel", "split by channel",
         "how many are ipg", "how many are pos", "ipg and pos",
+        "none", "neither", "no channel", "channel type", "product type",
+        "channel wise", "channel-wise",
     ])
     if _wants_breakdown:
+        # MUTUALLY EXCLUSIVE categories (incl. NONE), summing to the total — the old
+        # shape (has_ipg / has_pos overlap counts) made the insights LLM call 121
+        # "IPG-only" and derive a wrong NONE figure by subtraction.
         return f"""
 SELECT
-    SUM(has_ipg)                                   AS ipg_merchants,
-    SUM(has_pos)                                   AS pos_merchants,
-    SUM(CASE WHEN has_ipg = 1 AND has_pos = 1 THEN 1 ELSE 0 END) AS both_channels,
-    COUNT(*)                                       AS total_onboarded
+    SUM(CASE WHEN has_ipg = 1 AND has_pos = 0 THEN 1 ELSE 0 END) AS ipg_only,
+    SUM(CASE WHEN has_pos = 1 AND has_ipg = 0 THEN 1 ELSE 0 END) AS pos_only,
+    SUM(CASE WHEN has_ipg = 1 AND has_pos = 1 THEN 1 ELSE 0 END) AS ipg_and_pos,
+    SUM(CASE WHEN has_ipg = 0 AND has_pos = 0 THEN 1 ELSE 0 END) AS none_no_channel,
+    COUNT(*)                                                     AS total_onboarded
 FROM (
     SELECT
         s.store_id,
@@ -3361,19 +3430,16 @@ FROM (
     LEFT JOIN (
         SELECT DISTINCT store_id FROM webxpay_master.tbl_pos_store_bank_mid WHERE is_active = 1
     ) pm ON pm.store_id = s.store_id
-    WHERE {date_filter}
-      AND s.free_trail = 0
-      AND s.is_active = 1
-      AND (ig.store_id IS NOT NULL OR pm.store_id IS NOT NULL)
+    WHERE {date_filter}{status_filter.replace(chr(10) + "  ", chr(10) + "      ")}
     GROUP BY s.store_id
 ) x;
 """.strip()
 
-    # Detect channel
+    # Detect channel — join a channel table ONLY when the user names one; a generic
+    # "merchants onboarded" counts every onboarded merchant regardless of channel setup.
     is_pos = "pos" in ql
-    is_ipg = "ipg" in ql or (not is_pos)
+    is_ipg = "ipg" in ql
 
-    # Channel existence join
     if is_pos and not is_ipg:
         channel_join = """
 JOIN (
@@ -3384,14 +3450,16 @@ JOIN (
 JOIN (
     SELECT DISTINCT store_id FROM webxpay_master.tbl_store_payment_gateway_2 WHERE is_active = 1
 ) ch ON ch.store_id = s.store_id"""
-    else:
-        # Both — union of both channels
+    elif is_ipg and is_pos:
+        # Both named — union of both channels
         channel_join = """
 JOIN (
     SELECT DISTINCT store_id FROM webxpay_master.tbl_store_payment_gateway_2 WHERE is_active = 1
     UNION
     SELECT DISTINCT store_id FROM webxpay_master.tbl_pos_store_bank_mid WHERE is_active = 1
 ) ch ON ch.store_id = s.store_id"""
+    else:
+        channel_join = ""
 
     # Detect if user wants a list or just a count
     want_list = any(w in ql for w in ["list", "show", "who", "which", "name", "details"])
@@ -3407,9 +3475,7 @@ SELECT
         ELSE 'date_registered'
     END AS date_source
 FROM webxpay_master.tbl_store s{channel_join}
-WHERE {date_filter}
-  AND s.free_trail = 0
-  AND s.is_active = 1
+WHERE {date_filter}{status_filter}
 ORDER BY onboard_date DESC;
 """.strip()
     else:
@@ -3417,9 +3483,7 @@ ORDER BY onboard_date DESC;
 SELECT
     COUNT(DISTINCT s.store_id) AS merchants_onboarded
 FROM webxpay_master.tbl_store s{channel_join}
-WHERE {date_filter}
-  AND s.free_trail = 0
-  AND s.is_active = 1;
+WHERE {date_filter}{status_filter};
 """.strip()
 
 
@@ -3439,8 +3503,10 @@ def build_merchant_onboarding_timeseries_sql(question: str, ds: str, de: str, gr
         bucket = "DATE_FORMAT(COALESCE(s.credit_review_approved_date, s.date_registered), '%Y-%m')"
         alias = "onboard_month"
 
+    # Same canonical definition as build_merchant_onboarding_sql: event-based
+    # (free_trail=0, no is_active filter, channel join only when a channel is named).
     is_pos = "pos" in ql
-    is_ipg = "ipg" in ql or (not is_pos)
+    is_ipg = "ipg" in ql
 
     if is_pos and not is_ipg:
         channel_join = """
@@ -3452,13 +3518,15 @@ JOIN (
 JOIN (
     SELECT DISTINCT store_id FROM webxpay_master.tbl_store_payment_gateway_2 WHERE is_active = 1
 ) ch ON ch.store_id = s.store_id"""
-    else:
+    elif is_ipg and is_pos:
         channel_join = """
 JOIN (
     SELECT DISTINCT store_id FROM webxpay_master.tbl_store_payment_gateway_2 WHERE is_active = 1
     UNION
     SELECT DISTINCT store_id FROM webxpay_master.tbl_pos_store_bank_mid WHERE is_active = 1
 ) ch ON ch.store_id = s.store_id"""
+    else:
+        channel_join = ""
 
     return f"""
 SELECT
@@ -3466,9 +3534,7 @@ SELECT
     COUNT(DISTINCT s.store_id) AS merchants_onboarded
 FROM webxpay_master.tbl_store s{channel_join}
 WHERE COALESCE(s.credit_review_approved_date, s.date_registered) >= '{ds}'
-  AND COALESCE(s.credit_review_approved_date, s.date_registered) < '{de}'
-  AND s.free_trail = 0
-  AND s.is_active = 1
+  AND COALESCE(s.credit_review_approved_date, s.date_registered) < '{de}'{_onboarding_status_filter(question)}
 GROUP BY {bucket}
 ORDER BY {bucket} ASC;
 """.strip()
@@ -3476,15 +3542,19 @@ ORDER BY {bucket} ASC;
 
 def build_merchant_type_sql(filter_type: str = "all") -> str:
     """
-    Returns active merchants classified as IPG Only / POS Only / IPG and POS.
-    filter_type: 'all' | 'ipg' | 'pos' | 'both'
+    Returns active merchants classified as IPG Only / POS Only / IPG and POS / Neither.
+    filter_type: 'all' | 'ipg' | 'pos' | 'both' | 'none'
+    'all' includes the Neither class — merchants with no active channel setup are a
+    real category (the Power BI product-type chart shows them as NONE); excluding
+    them made "how many are none" unanswerable.
     """
     where_clause = {
         "ipg":  "ipg.store_id IS NOT NULL AND pos.store_id IS NULL",
         "pos":  "pos.store_id IS NOT NULL AND ipg.store_id IS NULL",
         "both": "ipg.store_id IS NOT NULL AND pos.store_id IS NOT NULL",
-        "all":  "(ipg.store_id IS NOT NULL OR pos.store_id IS NOT NULL)",
-    }.get(filter_type, "(ipg.store_id IS NOT NULL OR pos.store_id IS NOT NULL)")
+        "none": "ipg.store_id IS NULL AND pos.store_id IS NULL",
+        "all":  "1=1",
+    }.get(filter_type, "1=1")
 
     return f"""
 SELECT
@@ -3515,13 +3585,15 @@ ORDER BY merchant_type, s.doing_business_name;
 
 
 def build_merchant_type_count_sql(filter_type: str = "all") -> str:
-    """Returns counts grouped by merchant_type."""
+    """Counts grouped by merchant_type. 'all' includes the Neither/NONE class
+    (see build_merchant_type_sql)."""
     where_clause = {
         "ipg":  "ipg.store_id IS NOT NULL AND pos.store_id IS NULL",
         "pos":  "pos.store_id IS NOT NULL AND ipg.store_id IS NULL",
         "both": "ipg.store_id IS NOT NULL AND pos.store_id IS NOT NULL",
-        "all":  "(ipg.store_id IS NOT NULL OR pos.store_id IS NOT NULL)",
-    }.get(filter_type, "(ipg.store_id IS NOT NULL OR pos.store_id IS NOT NULL)")
+        "none": "ipg.store_id IS NULL AND pos.store_id IS NULL",
+        "all":  "1=1",
+    }.get(filter_type, "1=1")
 
     return f"""
 SELECT
@@ -4799,8 +4871,22 @@ Classify the NEW message and respond with ONLY a JSON object:
                channel and entities from the conversation. If already self-contained,
                copy it verbatim. For kind=meta: copy the NEW message verbatim.>",
   "answer": "<for kind=meta ONLY: a short, direct, honest reply grounded in the
-             conversation above. For kind=data: null.>"
+             conversation above. For kind=data: null.>",
+  "source": "internal" | "web" | "both"
 }}
+
+"source" = where the answer must come from — judge by MEANING, not keywords:
+- "internal": our own database (merchants, GMV, revenue, RMs, transactions, rates...).
+  Most questions. Also opinion/assessment questions answerable with our data plus
+  general knowledge ("are we doing well?").
+- "web": the user wants EXTERNAL/public information looked up — published market or
+  industry data, competitor facts, news, whether a business still operates, named
+  sources/reports. However it is phrased: "check what's happening out there",
+  "is that number realistic vs what others are seeing right now", "find out if these
+  companies are still in business", "get me the actual published figures".
+- "both": validate/compare OUR figures against external data, or research entities
+  FROM our data on the web ("cross-check these numbers with the market",
+  "web-search our top 10 lost merchants — worth re-onboarding?").
 
 Definitions:
 - "data" = the user wants figures/records from the database (GMV, revenue, merchants,
@@ -4836,6 +4922,13 @@ especially any breakdown like monthly/per-merchant/seasonality) — with a prese
 note appended (e.g. "presented as a clearly structured table"). NEVER shorten the
 original question to just its headline (a rewrite that dropped 'monthly breakdown'
 once turned a co-marketing seasonality analysis into a plain top-20 totals list).
+
+REDO / "table is not clear" / "didn't get that" follow-ups mean the previous
+PRESENTATION failed the user — the rewrite must ask for the SAME data from a
+DIFFERENT, clearer angle, not a repeat: spell out what to improve (e.g. "with month
+names instead of 2026-01, thousand separators, a month-over-month % change column,
+and a totals row" — or a different grouping/perspective the user likely wants).
+Repeating the identical output is a failure.
 
 SPELLING CORRECTIONS: when the user re-supplies or corrects a name ("pramoda",
 "the name is pramoda"), the rewritten question MUST use the user's LATEST spelling
@@ -4902,11 +4995,14 @@ JSON:"""
         if kind == "data" and len(rewritten) > 4 * len(question) + 200:
             rewritten = question
         answer = spec.get("answer")
+        source = str(spec.get("source") or "").strip().lower()
+        if source not in ("internal", "web", "both"):
+            source = None  # unknown → let the regex fallback decide
         if kind == "meta" and not (isinstance(answer, str) and answer.strip()):
             # Meta but no usable answer → fall back to treating as data so the user
             # still gets a response rather than silence.
-            return {"kind": "data", "question": question, "answer": None}
-        return {"kind": kind, "question": rewritten, "answer": answer}
+            return {"kind": "data", "question": question, "answer": None, "source": source}
+        return {"kind": kind, "question": rewritten, "answer": answer, "source": source}
     except Exception:
         return fallback
 
@@ -5546,10 +5642,13 @@ def handle_monthly_gmv_trend(question: str, sql_executor, ds: str, de: str):
             "answer": insights, "insights": insights, "response_type": "data_query"}
 
 
-def handle_top_merchants_mart(question: str, n_str=None):
+def handle_top_merchants_mart(question: str, n_str=None, sql_executor=None):
     """Top-N merchants by GMV from the local mart (instant, both channels,
     validated dedup/FX logic). The live-MySQL version of this timed out.
-    Returns None when the mart can't serve it (no coverage / no rows)."""
+    Returns None when the mart can't serve it (no coverage / no rows).
+    TODAY is special-cased to LIVE single-day queries when an executor is given —
+    the mart refreshes every ~6h, so an intraday ranking from it can be hours stale
+    (and "till what time is this" was unanswerable)."""
     try:
         from redesign.pos_summary_mart import mart_query, mart_coverage
         cov = mart_coverage()
@@ -5573,24 +5672,123 @@ def handle_top_merchants_mart(question: str, n_str=None):
     ql = question.lower()
     want_ipg = "ipg" in ql and "pos" not in ql
     want_pos = "pos" in ql and "ipg" not in ql
+    # volume = transaction COUNT (canonical: volume means count, not value). The mart
+    # stores per-store daily txn counts, so this ranking is as instant as GMV — the
+    # live-MySQL fallback for "top 10 by volume" took ages.
+    want_volume = bool(re.search(
+        r"(?i)\bvolume\b|\bcounts?\b|\b(?:number|no\.?)\s+of\s+(?:txns?|transactions)\b|"
+        r"\bmost\s+transactions\b|\btransactions\b(?!\s*(?:value|amount|gmv))", ql))
+
+    # ── TODAY: rank from LIVE MySQL (cheap single-day scans, current to the minute) ──
+    if sql_executor and str(ds) == datetime.now().date().isoformat():
+        try:
+            _live: dict = {}
+            if not want_pos:
+                _ipg_live = sql_executor("""
+SELECT o.store_id, ROUND(SUM(CASE
+    WHEN o.processing_currency_id = '5' THEN o.total_amount
+    WHEN o.exchange_rate IS NOT NULL AND o.exchange_rate NOT LIKE ''
+         AND o.exchange_rate REGEXP '^[0-9]+(\\.[0-9]+)?$'
+      THEN o.total_amount * o.exchange_rate
+    ELSE o.total_amount * (SELECT er.buying_rate FROM tbl_exchange_rate er
+                           WHERE er.currency_id = o.processing_currency_id
+                             AND er.date <= DATE(p.date_time_transaction)
+                           ORDER BY er.date DESC LIMIT 1)
+END), 2) AS gmv, COUNT(*) AS txns
+FROM tbl_order o JOIN tbl_payment p ON p.payment_id = o.payment_id
+WHERE o.payment_status_id = 2 AND p.date_time_transaction >= CURDATE()
+GROUP BY o.store_id""")
+                for r in (_ipg_live if isinstance(_ipg_live, list) else []):
+                    _s = _live.setdefault(r["store_id"],
+                                          {"ipg": 0.0, "pos": 0.0, "ipg_n": 0, "pos_n": 0})
+                    _s["ipg"] += float(r.get("gmv") or 0)
+                    _s["ipg_n"] += int(r.get("txns") or 0)
+            if not want_ipg:
+                _pos_live = sql_executor("""
+SELECT t.store_id, ROUND(SUM(t.amount), 2) AS gmv, COUNT(*) AS txns
+FROM tbl_pos_transactions t
+WHERE t.transaction_date = CURDATE() AND t.currency = 'LKR'
+  AND LOWER(TRIM(COALESCE(t.txn_type,''))) IN ('sale','amex')
+GROUP BY t.store_id""")
+                for r in (_pos_live if isinstance(_pos_live, list) else []):
+                    _s = _live.setdefault(r["store_id"],
+                                          {"ipg": 0.0, "pos": 0.0, "ipg_n": 0, "pos_n": 0})
+                    _s["pos"] += float(r.get("gmv") or 0)
+                    _s["pos_n"] += int(r.get("txns") or 0)
+            if _live:
+                _names = {r["store_id"]: r["merchant_name"] for r in (mart_query(
+                    "SELECT store_id, merchant_name FROM store_dim", max_rows=20000) or [])}
+                _rows_t = [{"merchant_name": _names.get(sid, f"Store {sid}"),
+                            "store_id": sid,
+                            "ipg_gmv_lkr": round(v["ipg"], 2),
+                            "pos_gmv_lkr": round(v["pos"], 2),
+                            "total_gmv_lkr": round(v["ipg"] + v["pos"], 2),
+                            "ipg_txns": v["ipg_n"],
+                            "pos_txns": v["pos_n"],
+                            "total_txns": v["ipg_n"] + v["pos_n"]}
+                           for sid, v in _live.items()
+                           if (v["ipg"] + v["pos"]) > 0 or (v["ipg_n"] + v["pos_n"]) > 0]
+                _rank_key = "total_txns" if want_volume else "total_gmv_lkr"
+                _rows_t.sort(key=lambda r: r[_rank_key], reverse=True)
+                _rows_t = _rows_t[:n]
+                if _rows_t:
+                    _now = datetime.now().strftime("%H:%M")
+                    _ch = ("IPG-only" if want_ipg else
+                           "POS-only" if want_pos else "IPG + POS combined")
+                    _t0 = _rows_t[0]
+                    _metric_t = ("transaction volume" if want_volume else "GMV")
+                    _lead_t = (f"**{_t0['total_txns']:,} transactions**" if want_volume
+                               else f"**Rs {_t0['total_gmv_lkr']:,.2f}**")
+                    _second_t = ""
+                    if len(_rows_t) > 1:
+                        _r1 = _rows_t[1]
+                        _second_t = (f", ahead of {_r1['merchant_name']} "
+                                     + (f"({_r1['total_txns']:,} txns)" if want_volume
+                                        else f"(Rs {_r1['total_gmv_lkr']:,.2f})"))
+                    _ans_t = (f"**Top {len(_rows_t)} merchants by {_metric_t} so far TODAY** "
+                              f"({_ch}), live as of **{_now}**. "
+                              f"**{_t0['merchant_name']}** leads with {_lead_t}{_second_t}"
+                              + ".\n\nFigures are live from today's transactions "
+                                "(approved IPG orders, LKR-converted; POS sale/amex "
+                                "excluding voided rows) — they will keep growing "
+                                "through the day.")
+                    return {
+                        "question": question,
+                        "sql": {"live": "single-day IPG + POS ranking, today",
+                                "as_of": _now},
+                        "raw_result": _rows_t,
+                        "answer": _ans_t,
+                        "insights": _ans_t,
+                        "response_type": "data_query",
+                        "engine": "live",
+                    }
+        except Exception as _tl_e:
+            print(f"[handle_top_merchants_mart] live-today failed, using mart: {_tl_e}")
     ipg_expr = "0" if want_pos else "COALESCE(i.gmv,0)"
     pos_expr = "0" if want_ipg else "COALESCE(p.amt,0)"
+    ipg_n_expr = "0" if want_pos else "COALESCE(i.txns,0)"
+    pos_n_expr = "0" if want_ipg else "COALESCE(p.txns,0)"
+    rank_col = "total_txns" if want_volume else "total_gmv_lkr"
 
     rows = mart_query(f"""
         SELECT d.merchant_name, d.store_id,
                ROUND(SUM({ipg_expr}),2) AS ipg_gmv_lkr,
                ROUND(SUM({pos_expr}),2) AS pos_gmv_lkr,
-               ROUND(SUM({ipg_expr}) + SUM({pos_expr}),2) AS total_gmv_lkr
+               ROUND(SUM({ipg_expr}) + SUM({pos_expr}),2) AS total_gmv_lkr,
+               SUM({ipg_n_expr}) AS ipg_txns,
+               SUM({pos_n_expr}) AS pos_txns,
+               SUM({ipg_n_expr}) + SUM({pos_n_expr}) AS total_txns
         FROM store_dim d
-        LEFT JOIN (SELECT store_id, SUM(gmv) gmv FROM ipg_daily_gmv
+        LEFT JOIN (SELECT store_id, SUM(gmv) gmv, SUM(txn_count) txns FROM ipg_daily_gmv
                    WHERE activity_date >= '{ds}' AND activity_date < '{de}'
                    GROUP BY store_id) i ON i.store_id = d.store_id
-        LEFT JOIN (SELECT store_id, SUM(valid_sale_amount) amt FROM pos_daily_activity
+        LEFT JOIN (SELECT store_id, SUM(valid_sale_amount) amt, SUM(valid_sale_count) txns
+                   FROM pos_daily_activity
                    WHERE activity_date >= '{ds}' AND activity_date < '{de}'
                    GROUP BY store_id) p ON p.store_id = d.store_id
         GROUP BY d.store_id
-        HAVING total_gmv_lkr > 0
-        ORDER BY total_gmv_lkr DESC
+        HAVING {rank_col} > 0
+        ORDER BY {rank_col} DESC
         LIMIT {n}""")
     if not isinstance(rows, list) or not rows:
         return None
@@ -5599,16 +5797,24 @@ def handle_top_merchants_mart(question: str, n_str=None):
     period = (f"the last 30 days ({ds} to {de}, no period was specified)"
               if default_period else f"{ds} to {de}")
     top = rows[0]
-    answer = (f"**Top {len(rows)} merchants by GMV** ({channel}, LKR) for {period}. "
-              f"**{top['merchant_name']}** leads with **Rs {top['total_gmv_lkr']:,.2f}**"
-              + (f", ahead of {rows[1]['merchant_name']} (Rs {rows[1]['total_gmv_lkr']:,.2f})"
-                 if len(rows) > 1 else "") +
+    metric_label = "transaction volume" if want_volume else "GMV"
+    lead = (f"**{int(top['total_txns']):,} transactions** "
+            f"(Rs {top['total_gmv_lkr']:,.2f} GMV)" if want_volume
+            else f"**Rs {top['total_gmv_lkr']:,.2f}**")
+    second = ""
+    if len(rows) > 1:
+        r1 = rows[1]
+        second = (f", ahead of {r1['merchant_name']} "
+                  + (f"({int(r1['total_txns']):,} txns)" if want_volume
+                     else f"(Rs {r1['total_gmv_lkr']:,.2f})"))
+    answer = (f"**Top {len(rows)} merchants by {metric_label}** ({channel}) for {period}. "
+              f"**{top['merchant_name']}** leads with {lead}{second}"
               f".\n\nFigures come from the pre-computed daily summary (validated void-dedup "
               f"POS + FX-converted IPG), data through {min(cov.get('pos_to') or '', cov.get('ipg_to') or '') or 'today'}.")
     return {
         "question": question,
         "sql": {"mart": f"local summary_mart.sqlite3: store_dim x ipg_daily_gmv x "
-                        f"pos_daily_activity, {ds}..{de}, top {n} by combined GMV"},
+                        f"pos_daily_activity, {ds}..{de}, top {n} by combined {metric_label}"},
         "raw_result": rows,
         "answer": answer,
         "insights": answer,
@@ -5675,7 +5881,7 @@ def handle_user_question(question: str, sql_executor, history=None):
         # actually answer ("where will webxpay be in 5 years", "are we keeping up with
         # market trends") — the follow-up LLM used to reply "I cannot make predictions"
         # before those handlers ever saw the question.
-        _is_ol = _is_adv = False
+        _is_ol = _is_adv = _is_web = False
         try:
             from outlook import is_outlook_question as _ioq
             _is_ol = _ioq(question)
@@ -5686,7 +5892,29 @@ def handle_user_question(question: str, sql_executor, history=None):
             _is_adv = _iaq(question)
         except Exception:
             pass
-        if not (_is_ol or _is_adv):
+        try:
+            from web_research import is_web_question as _iwq
+            # PRIMARY signal: the interpreter LLM understood the question needs
+            # external data (any phrasing). The keyword regex is only the fallback
+            # for when that classification is missing.
+            _is_web = (_interp.get("source") in ("web", "both")) or _iwq(question)
+        except Exception:
+            pass
+        # Only bypass the meta answer when it is a REFUSAL an engine can do better
+        # ("I cannot make predictions"). A genuine correction/complaint ("Projection
+        # is not correct") must stay conversational — bypassing it once made the bot
+        # re-send the same canned outlook three times in a row.
+        _is_refusal = bool(re.search(
+            r"(?i)\bcannot\b|\bcan't\b|\bunable to\b|\bnot able to\b|"
+            r"\bdon'?t have (?:the )?(?:ability|capability|access)\b|\bno capability\b|"
+            r"\bonly provide\b|\bI'?m limited to\b",
+            _interp["answer"] or ""))
+        # A web-research request ("give me the sources for that industry data") can
+        # NEVER be satisfied by a conversational meta reply — always let it through.
+        # And a REFUSAL ("I cannot access live market data") must NEVER be the final
+        # answer straight from the meta layer: fall through and give the real engines
+        # (web/outlook/advisor/agent) a chance — they decide what's possible.
+        if not (_is_web or _is_refusal):
             return {
                 "question": question,
                 "sql": None,
@@ -5697,7 +5925,28 @@ def handle_user_question(question: str, sql_executor, history=None):
             }
     # "what about allianz on these two days" → standalone question with the dates
     # and metric carried over from the previous turn.
+    _orig_q_pre_rewrite = question
     question = _interp.get("question") or question
+
+    # ── Step 0a-web: questions needing EXTERNAL information get web research ──
+    # PRIMARY: the interpreter LLM classifies every question's data source by
+    # MEANING (internal DB / web / both) — "check what's happening out there" works
+    # without any magic keyword. FALLBACK: the keyword patterns, for when the
+    # interpreter call failed or there was no history (first turn).
+    try:
+        from web_research import is_web_question, handle_web_research
+        _needs_web = (
+            _interp.get("source") in ("web", "both")
+            or is_web_question(_orig_q_pre_rewrite)
+            or is_web_question(question)
+        )
+        if _needs_web:
+            _web = handle_web_research(question, history=history,
+                                       sql_executor=sql_executor)
+            if isinstance(_web, dict) and _web.get("answer"):
+                return _web
+    except Exception as _web_e:
+        print(f"[handle_user_question] web research unavailable: {_web_e}")
 
     # ── Step 0a-outlook: forward-looking questions get grounded projections ──
     # "where would webxpay be in 10 years" used to be refused by the knowledge
@@ -5750,7 +5999,18 @@ def handle_user_question(question: str, sql_executor, history=None):
     _ql_nt = question.lower()
     # "onboarded this year with zero transactions" needs an onboarding-date filter the
     # mart handler doesn't apply — let the onboarding/agent paths take those.
-    if any(k in _ql_nt for k in _nt_kw) and "onboard" not in _ql_nt:
+    # CHURN-shaped questions ("transacted in 2025 but zero in 2026", "lost/lapsed/not
+    # returned", any TWO-period comparison, or a transaction-count threshold) are NOT
+    # single-period non-transacting questions — they must reach the agent, whose
+    # semantic layer pins the churn definition. This gate once stole a rewritten
+    # churn follow-up and answered "457 didn't transact in 2025" about the wrong thing.
+    _churn_shape = (
+        any(k in _ql_nt for k in ("lost", "churn", "lapsed", "attrition", "not returned",
+                                  "returned to transact", "stopped", "but not", "but have",
+                                  "but had", "more than", "at least", "atleast"))
+        or len(set(re.findall(r"\b20\d{2}\b", question))) >= 2
+    )
+    if any(k in _ql_nt for k in _nt_kw) and "onboard" not in _ql_nt and not _churn_shape:
         try:
             from agent_engine import needs_agent_heuristic as _nah
             from redesign.pos_summary_mart import summary_ready, handle_non_transacting
@@ -5828,6 +6088,62 @@ def handle_user_question(question: str, sql_executor, history=None):
         except Exception as _pm_e:
             print(f"[handle_user_question] per-merchant agent unavailable: {_pm_e}")
 
+    # (LOST / CHURNED merchants — "how many merchants have we lost in 2026 who
+    #  transacted in 2025" — is NOT a keyword handler here: "lost" is too dangerous
+    #  a trigger (it would hijack "lost revenue on these transactions"). The agent
+    #  answers it consistently because its semantic layer now PINS the definition
+    #  of a lost/churned merchant + the exact mart query. See _BUSINESS_RULES.)
+
+    # ── Step 0c-pre: onboarding questions — deterministic canonical builder ──
+    # Must run BEFORE the LLM router: an onboarding question carrying an instruction
+    # ("don't check free trial") looks like a "non-standard filter" to the router,
+    # which sent it to the agent — the agent then invented its own date_registered
+    # SQL and the counts contradicted the canonical handler (471/359 vs 403). The
+    # builder honors free-trial/active overrides itself, and the answer always ends
+    # with the exact definition used. Person/RM angles ("onboarded by erandi") and
+    # analytic conditions (zero transactions, GMV of onboarded...) still go to the
+    # agent, which uses the same canonical definition from its semantic layer.
+    _ql_ob = question.lower()
+    _onboard_kw_pre = ["onboard", "new merchant", "newly registered",
+                       "registered merchant", "joined", "signed up", "added merchant",
+                       "new signups", "merchant signup", "merchant registration"]
+    _ob_extra_analysis = any(w in _ql_ob for w in (
+        "transact", "gmv", "revenue", "sales", "volume", "zero", "top ", "best",
+        "rm wise", "rm-wise", "by rm", "per rm"))
+    if any(k in _ql_ob for k in _onboard_kw_pre) and not _ob_extra_analysis:
+        _ob_agent = False
+        try:
+            from agent_engine import needs_agent_heuristic as _nah_ob
+            _ob_agent = _nah_ob(question)
+        except Exception:
+            pass
+        if not _ob_agent:
+            try:
+                _intent_ob = analyze_intent(question)
+                _ds_ob = _intent_ob.get("date_start")
+                _de_ob = _intent_ob.get("date_end")
+                _grain_ob = _intent_ob.get("time_grain")
+                if _grain_ob and _ds_ob and _de_ob:
+                    _sql_ob = build_merchant_onboarding_timeseries_sql(
+                        question, _ds_ob, _de_ob, _grain_ob)
+                else:
+                    _sql_ob = build_merchant_onboarding_sql(question, _ds_ob, _de_ob)
+                _result_ob = sql_executor(_sql_ob)
+                if isinstance(_result_ob, list):
+                    _insights_ob = generate_insights(question, _result_ob)
+                    _insights_ob = (f"{_insights_ob}\n\n"
+                                    f"{_onboarding_definition_note(question)}")
+                    return {
+                        "question": question,
+                        "sql": _sql_ob,
+                        "raw_result": _result_ob,
+                        "answer": _insights_ob,
+                        "insights": _insights_ob,
+                        "response_type": "data_query",
+                    }
+            except Exception as _ob_e:
+                print(f"[handle_user_question] onboarding fast path failed: {_ob_e}")
+
     # ── Step 0c: semantic router — non-canonical questions go to the agent ──
     # The agent reasons over the real schema and investigates with several
     # read-only queries (resolve person/merchant names, inspect values, then
@@ -5871,9 +6187,12 @@ def handle_user_question(question: str, sql_executor, history=None):
         r"(?i)\bmonthly\b|\bmonth[- ]by[- ]month\b|\bper month\b|\beach month\b|"
         r"\bmonth[- ]wise\b|\bbreakdown\b|\bseasonal|\bmom\b|\byoy\b|\btrend\b",
         question)
+    # GMV and VOLUME both come instantly from the mart (per-store daily gmv + txn
+    # counts). Only revenue/MDR stay on the legacy path — the mart has no rates.
+    # ("Top 10 merchants by volume" used to be excluded here and crawled live MySQL.)
     if (_top_m and not _wants_breakdown
-            and not any(w in question.lower() for w in ("revenue", "mdr", "volume", "count"))):
-        _fast = handle_top_merchants_mart(question, _top_m.group(1))
+            and not any(w in question.lower() for w in ("revenue", "mdr"))):
+        _fast = handle_top_merchants_mart(question, _top_m.group(1), sql_executor)
         if _fast:
             return _fast
     if _top_m and _wants_breakdown:
@@ -5953,6 +6272,157 @@ def handle_user_question(question: str, sql_executor, history=None):
     # Transaction-active merchant names/counts by POS/IPG channel.
     # Must run before merchant-type and overview routing.
     if _is_active_transacting_merchant_query(question):
+        # Mart shortcut. TWO different questions live under "active merchants":
+        #   1. "how many active merchants do we have" (NO period, NO transact words)
+        #      -> the CANONICAL flag-based definition: is_active=1 AND free_trail=0
+        #         plus channel setup flags. NO TIME RANGE — user explicitly corrected
+        #         a version of this answer that wrongly applied a YTD window.
+        #   2. "merchants that transacted / active in June" -> transaction activity
+        #      in a period (approved IPG + valid POS from the validated summaries).
+        try:
+            from redesign.pos_summary_mart import (summary_ready, mart_query,
+                                                   transacted_store_ids,
+                                                   ipg_transacted_store_ids)
+            _ql_am = question.lower()
+            _txn_words_am = ("transact", "processed", "had transaction", "did transaction")
+            _explicit_period_am = bool(re.search(
+                r"(?i)\b(20\d{2}|january|february|march|april|may|june|july|august|"
+                r"september|october|november|december|today|yesterday|ytd|"
+                r"last\s+(?:week|month|year|\d+\s+days?)|this\s+(?:week|month|year)|q[1-4])\b",
+                question))
+            _flag_based_am = not (any(w in _ql_am for w in _txn_words_am)
+                                  or _explicit_period_am)
+            if summary_ready() and _flag_based_am:
+                _ft_am = _active_merchant_filter_type(question)
+                _dim_fb = mart_query(
+                    "SELECT store_id, merchant_name, has_ipg, has_pos FROM store_dim "
+                    "WHERE is_active=1 AND free_trail=0 AND (has_ipg=1 OR has_pos=1)",
+                    max_rows=20000)
+                _rows_fb = []
+                for _r in (_dim_fb if isinstance(_dim_fb, list) else []):
+                    _in_i, _in_p = _r["has_ipg"] == 1, _r["has_pos"] == 1
+                    _grp = ("IPG and POS" if (_in_i and _in_p)
+                            else "IPG Only" if _in_i else "POS Only")
+                    if ((_ft_am == "both" and _grp != "IPG and POS")
+                            or (_ft_am == "ipg_only" and _grp != "IPG Only")
+                            or (_ft_am == "pos_only" and _grp != "POS Only")
+                            or (_ft_am == "ipg" and not _in_i)
+                            or (_ft_am == "pos" and not _in_p)):
+                        continue
+                    _rows_fb.append({"merchant_name": _r["merchant_name"],
+                                     "store_id": _r["store_id"], "merchant_type": _grp})
+                if _rows_fb:
+                    _rows_fb.sort(key=lambda r: (r["merchant_type"], r["merchant_name"] or ""))
+                    _b = sum(1 for r in _rows_fb if r["merchant_type"] == "IPG and POS")
+                    _io = sum(1 for r in _rows_fb if r["merchant_type"] == "IPG Only")
+                    _po = sum(1 for r in _rows_fb if r["merchant_type"] == "POS Only")
+                    if _active_merchant_count_requested(question):
+                        _res_fb = [{"merchant_group": g, "merchant_count": n}
+                                   for g, n in (("IPG and POS", _b), ("IPG Only", _io),
+                                                ("POS Only", _po)) if n]
+                        _ans_fb = (f"We currently have {len(_rows_fb):,} active merchants — "
+                                   f"{_b + _io:,} set up for IPG and {_b + _po:,} set up "
+                                   f"for POS (both channels: {_b:,}; IPG only: {_io:,}; "
+                                   f"POS only: {_po:,}). Active = account status flags "
+                                   f"(is_active set, not on free trial) with an active "
+                                   f"gateway/POS terminal — no time range applied.")
+                    else:
+                        _res_fb = _rows_fb
+                        _ans_fb = (f"We currently have {len(_rows_fb):,} active merchants "
+                                   f"(IPG and POS: {_b:,}; IPG only: {_io:,}; POS only: "
+                                   f"{_po:,}) — see the table for names. Active = account "
+                                   f"status flags, no time range applied.")
+                    return {
+                        "question": question,
+                        "sql": {"source": "local summary_mart.sqlite3 (store_dim)",
+                                "definition": "flag-based active — no time range",
+                                "filter": _ft_am},
+                        "raw_result": _res_fb,
+                        "answer": _ans_fb,
+                        "insights": _ans_fb,
+                        "response_type": "data_query",
+                        "engine": "new",
+                    }
+            if summary_ready():
+                _int_am = analyze_intent(question)
+                _ds_am = _int_am.get("date_start") or f"{datetime.now().year}-01-01"
+                _de_am = _int_am.get("date_end") or datetime.now().strftime("%Y-%m-%d")
+                _cov_ok = str(_ds_am) >= "2024-09-14"
+                if _cov_ok:
+                    _pos_set = transacted_store_ids(_ds_am, _de_am)
+                    _ipg_set = ipg_transacted_store_ids(_ds_am, _de_am)
+                    # "ACTIVE merchants that transacted" -> apply the status flags.
+                    # Pure "merchants that transacted" -> NO status filter (canonical:
+                    # a merchant that transacted counts even if since deactivated —
+                    # the flag filter once wrongly cut POS 2025 from 754 to 549).
+                    _require_flags_am = "active" in _ql_am
+                    _dim_sql_am = ("SELECT store_id, merchant_name FROM store_dim"
+                                   + (" WHERE is_active=1 AND free_trail=0"
+                                      if _require_flags_am else ""))
+                    # store_dim has 7k+ rows — mart_query's default 5000-row cap once
+                    # silently dropped ~2000 stores and undercounted 1,403 -> 288.
+                    _dim_am = mart_query(_dim_sql_am, max_rows=20000)
+                    _ft_am = _active_merchant_filter_type(question)
+                    _rows_am = []
+                    for _r in (_dim_am if isinstance(_dim_am, list) else []):
+                        _sid = _r["store_id"]
+                        _in_i, _in_p = _sid in _ipg_set, _sid in _pos_set
+                        if not (_in_i or _in_p):
+                            continue
+                        _grp = ("IPG and POS" if (_in_i and _in_p)
+                                else "IPG Only" if _in_i else "POS Only")
+                        if ((_ft_am == "both" and _grp != "IPG and POS")
+                                or (_ft_am == "ipg_only" and _grp != "IPG Only")
+                                or (_ft_am == "pos_only" and _grp != "POS Only")
+                                or (_ft_am == "ipg" and not _in_i)
+                                or (_ft_am == "pos" and not _in_p)):
+                            continue
+                        _rows_am.append({"merchant_name": _r["merchant_name"],
+                                         "store_id": _sid, "merchant_type": _grp})
+                    if _rows_am:
+                        _rows_am.sort(key=lambda r: (r["merchant_type"], r["merchant_name"] or ""))
+                        _n_both = sum(1 for r in _rows_am if r["merchant_type"] == "IPG and POS")
+                        _n_io = sum(1 for r in _rows_am if r["merchant_type"] == "IPG Only")
+                        _n_po = sum(1 for r in _rows_am if r["merchant_type"] == "POS Only")
+                        # period honesty: never display a future end date as covered
+                        _de_show = min(str(_de_am), datetime.now().strftime("%Y-%m-%d"))
+                        _period_am = f"{_ds_am} to {_de_show}"
+                        _def_am = ("flag-active and had at least one approved IPG or valid "
+                                   "POS transaction in the period"
+                                   if _require_flags_am else
+                                   "had at least one approved IPG or valid POS transaction "
+                                   "in the period (regardless of current account status)")
+                        if _active_merchant_count_requested(question):
+                            _res_am = [{"merchant_group": g, "merchant_count": n}
+                                       for g, n in (("IPG and POS", _n_both),
+                                                    ("IPG Only", _n_io),
+                                                    ("POS Only", _n_po)) if n]
+                            _ans_am = (f"Transacting merchants ({_period_am}): "
+                                       f"{len(_rows_am):,} total — via IPG "
+                                       f"{_n_both + _n_io:,}, via POS {_n_both + _n_po:,} "
+                                       f"(both channels: {_n_both:,}; IPG only: {_n_io:,}; "
+                                       f"POS only: {_n_po:,}). A merchant counts if it "
+                                       f"{_def_am}.")
+                        else:
+                            _res_am = _rows_am
+                            _ans_am = (f"Found {len(_rows_am):,} merchants that "
+                                       f"transacted between {_period_am} — breakdown: "
+                                       f"IPG and POS: {_n_both:,}, IPG Only: {_n_io:,}, "
+                                       f"POS Only: {_n_po:,}. See the table for names. "
+                                       f"A merchant counts if it {_def_am}.")
+                        return {
+                            "question": question,
+                            "sql": {"source": "local summary_mart.sqlite3 (store_dim + "
+                                              "daily activity)", "period": _period_am,
+                                    "filter": _ft_am},
+                            "raw_result": _res_am,
+                            "answer": _ans_am,
+                            "insights": _ans_am,
+                            "response_type": "data_query",
+                            "engine": "new",
+                        }
+        except Exception as _am_e:
+            print(f"[handle_user_question] mart active-merchants unavailable: {_am_e}")
         _schema_am = load_schema()
         _sql_am = generate_sql(question, _schema_am)
         _result_am = sql_executor(_sql_am)
@@ -6001,6 +6471,59 @@ def handle_user_question(question: str, sql_executor, history=None):
                            "summary", "summarize", "summarise", "top ", "best", "trend")
     if (any(k in ql_huq for k in _mtype_kw_h) and "transact" not in ql_huq
             and not any(w in ql_huq for w in _mtype_metric_words)):
+        # Channel-setup counts/lists come INSTANTLY from the mart's store_dim (which
+        # holds has_ipg/has_pos per store) — the live-MySQL version of the 3-bucket
+        # count scanned tbl_order and timed out at 180s.
+        try:
+            from redesign.pos_summary_mart import summary_ready, mart_query
+            if summary_ready():
+                _want_count_mt = any(w in ql_huq for w in ("how many", "count", "number of"))
+                _bucket = ("CASE WHEN has_ipg=1 AND has_pos=1 THEN 'IPG and POS' "
+                           "WHEN has_ipg=1 THEN 'IPG Only' "
+                           "WHEN has_pos=1 THEN 'POS Only' ELSE 'Neither' END")
+                _flt = ("WHERE is_active=1 AND free_trail=0 AND (has_ipg=1 OR has_pos=1)")
+                if "ipg only" in ql_huq:
+                    _flt += " AND has_ipg=1 AND has_pos=0"
+                elif "pos only" in ql_huq:
+                    _flt += " AND has_ipg=0 AND has_pos=1"
+                elif "both" in ql_huq:
+                    _flt += " AND has_ipg=1 AND has_pos=1"
+                if _want_count_mt:
+                    _sql_mt = (f"SELECT {_bucket} AS merchant_group, COUNT(*) AS merchant_count "
+                               f"FROM store_dim {_flt} GROUP BY merchant_group "
+                               f"ORDER BY merchant_count DESC")
+                else:
+                    _sql_mt = (f"SELECT merchant_name, store_id, {_bucket} AS merchant_type "
+                               f"FROM store_dim {_flt} ORDER BY merchant_type, merchant_name")
+                _result_mt = mart_query(_sql_mt)
+                if isinstance(_result_mt, list) and _result_mt:
+                    if _want_count_mt:
+                        _parts = [f"{r['merchant_group']}: {r['merchant_count']:,}" for r in _result_mt]
+                        _tot = sum(r['merchant_count'] for r in _result_mt)
+                        _ipg_tot = sum(r['merchant_count'] for r in _result_mt
+                                       if 'IPG' in r['merchant_group'])
+                        _pos_tot = sum(r['merchant_count'] for r in _result_mt
+                                       if 'POS' in r['merchant_group'])
+                        _ans_mt = (f"Active merchants by channel setup: {'; '.join(_parts)} "
+                                   f"(total {_tot:,}). That means {_ipg_tot:,} merchants can "
+                                   f"take IPG payments and {_pos_tot:,} can take POS payments "
+                                   f"(merchants with both are counted in each). Active = "
+                                   f"is_active flag set and not on free trial.")
+                    else:
+                        _ans_mt = (f"Found {len(_result_mt):,} active merchants matching that "
+                                   f"channel setup — see the table for names. Active = "
+                                   f"is_active flag set and not on free trial.")
+                    return {
+                        "question": question,
+                        "sql": _sql_mt,
+                        "raw_result": _result_mt,
+                        "answer": _ans_mt,
+                        "insights": _ans_mt,
+                        "response_type": "data_query",
+                        "engine": "new",
+                    }
+        except Exception as _mt_e:
+            print(f"[handle_user_question] mart merchant-type unavailable: {_mt_e}")
         _schema_mt = load_schema()
         _sql_mt = generate_sql(question, _schema_mt)
         _result_mt = sql_executor(_sql_mt)

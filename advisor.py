@@ -44,6 +44,11 @@ _ADVISOR_PAT = re.compile(
     r"\badvice\b|\badvise\b|\brecommend|"
     r"\bsuggest(?:ion)?s?\b|\bhow (?:can|do|should) we improve\b|\bstrategy\b|\bstrategic\b|"
     r"\b(?:market|industry|current|ongoing) trends?\b|"
+    # "compare our results with the market growth" — normally web_research takes this
+    # first (real published data); this is the fallback when the web path fails, so
+    # the question never drops to the generic knowledge classifier's canned advice.
+    r"\bcompar\w*\b.{0,80}\b(?:market|industry|competitors?)\b|"
+    r"\b(?:market|industry) growth\b|"
     r"\bare we\b.{0,50}\b(?:up to date|up-to-date|competitive|on track|keeping up|"
     r"behind|ahead|doing (?:good|well|ok|okay))\b|"
     r"\bhow (?:are|is) (?:we|the company|webxpay) (?:doing|performing)\b")

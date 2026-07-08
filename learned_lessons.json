@@ -22,5 +22,11 @@
     "created_at": "2026-07-03T16:53:36.720397",
     "rule": "When computing transaction GMV/activity or listing transactions, do NOT filter by tbl_store.free_trail or is_active - a transaction counts regardless of the merchants current status flags. free_trail/is_active only apply when the question is about merchant STATUS (active merchant lists/counts).",
     "source_question": "to get transactions checking free trail is uncessar"
+  },
+  {
+    "id": "16c4c911d700",
+    "created_at": "2026-07-08T03:39:53.729153",
+    "rule": "When counting merchants onboarded, do not check the free trial status.",
+    "source_question": "how many merhcnats onboarded this year dont check free trial"
   }
 ]
