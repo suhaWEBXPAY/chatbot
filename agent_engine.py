@@ -118,7 +118,12 @@ def _chat(**kwargs):
     _delays = (2, 5, 10)
     for _i, _delay in enumerate(_delays):
         try:
-            return _client.chat.completions.create(**kwargs)
+            _t0 = time.monotonic()
+            _resp = _client.chat.completions.create(**kwargs)
+            _dt = time.monotonic() - _t0
+            if _dt > 5:
+                print(f"[timing] agent LLM call {_dt:.1f}s", flush=True)
+            return _resp
         except Exception as e:
             _es = str(e)
             _transient = any(t in _es for t in ("503", "UNAVAILABLE", "429",

@@ -3,6 +3,7 @@ from dotenv import load_dotenv
 import os
 import re
 import json
+import time
 import difflib
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor
@@ -4667,8 +4668,17 @@ def classify_question(question: str) -> dict:
         "credit card", "debit card", "visa", "master", "amex",
         "hnb", "dfcc", "seylan", "sampath", "commercial", "cargills", "ntb",
         "nations trust", "lankapay", "frimi", "mintpay",
+        # MCC/category questions are DATA (store_dim.mcc / tbl_category_code) —
+        # "what are the MCC we have" must list OUR categories, not define the term.
+        "mcc", "merchant category", "category code", "classification",
     ]
     _has_data_intent = any(d in ql for d in _data_intent)
+    # First-person business references are DATA, not general knowledge: "what are
+    # the mcc WE have", "which banks do WE support" ask about OUR setup — answerable
+    # only from the database, never by a definition. (Opinion questions like "how
+    # are we doing" are caught by the advisor before this classifier.)
+    if not _has_data_intent and re.search(r"\b(?:we|our|us)\b", ql):
+        _has_data_intent = True
 
     _knowledge_triggers = [
         "what is ", "what are ", "what does ", "what do ",
@@ -4689,10 +4699,22 @@ WEBXPAY context:
 - IPG = Internet Payment Gateway (online card payments via tbl_order)
 - POS = Point of Sale (physical terminals via tbl_pos_transactions, DFCC=provider 6, HNB=provider 5)
 - MDR = Merchant Discount Rate (fee % charged to merchants)
+- MCC = Merchant Category Code (business-type classification of each merchant,
+  e.g. Fast Food Restaurants, Travel Agencies — stored per merchant)
 - GMV = Gross Merchandise Value (total transaction amount processed)
 - Revenue = GMV × (merchant_rate − bank_rate) / 100
 - Currencies: LKR (id='5'), USD (id='2'), GBP, EUR, AUD
 - payment_status_id: 1=Abandoned, 2=Approved, 3=Declined, 4=Cancelled
+
+Questions about payments, WEBXPAY, or business terms (MDR, MCC, IPG, settlement...)
+are ON-TOPIC: answer them directly and completely, with NO redirect sentence and NO
+apology. Never say you cannot answer an on-topic term — explain it from the context
+above and general payments knowledge.
+
+ONLY if the question has NOTHING to do with WEBXPAY, payments, or this business
+(general trivia like "what is the capital of France"), answer it in ONE short
+friendly sentence, then add one sentence steering back, e.g. "…but I'm your WEBXPAY
+analytics assistant — want to look at GMV, revenue, or merchant activity?"
 
 Question: {question}"""
         try:
@@ -4839,24 +4861,32 @@ def interpret_followup(question: str, history=None) -> dict:
        ("that merchant", "these two days", "and revenue?", "do the same for May").
        For META: produces a short conversational answer grounded in the conversation.
 
-    Returns {"kind": "data"|"meta", "question": <standalone>, "answer": <str|None>}.
-    Falls back to {"kind":"data","question":<original>,"answer":None} on no-history or
-    any failure — never raises, never blocks a question from being answered.
+    Returns {"kind": "data"|"meta", "question": <standalone>, "answer": <str|None>,
+    "source": "internal"|"web"|"both"|None}.
+    Falls back to {"kind":"data","question":<original>,"answer":None} on any failure —
+    never raises, never blocks a question from being answered.
+
+    Runs on EVERY message, including the FIRST one of a chat: the `source`
+    classification is the PRIMARY internal-vs-web routing signal, and it must come
+    from the LLM understanding the question's meaning — not from keyword lists. The
+    old early-return on empty history meant first-turn questions ("latest CBSL
+    regulations on payment gateways") were routed by regex fallbacks alone and got
+    refused.
     """
     fallback = {"kind": "data", "question": question, "answer": None}
-    if not history:
-        return fallback
     try:
         turns = []
-        for m in history[-6:]:
+        for m in (history or [])[-6:]:
             role = m.get("role") or "user"
             content = (m.get("content") or "").strip()
             if not content:
                 continue
             turns.append(f"{'User' if role == 'user' else 'Assistant'}: {content[:1500]}")
-        if not turns:
-            return fallback
-        convo = "\n".join(turns)
+        convo = "\n".join(turns) if turns else (
+            "(none — this is the user's FIRST message; there is no prior "
+            "conversation. Treat it as kind=data unless it is pure greeting/small "
+            "talk, copy the message verbatim as the question, and classify its "
+            "source by meaning.)")
         today = datetime.now().date()
         prompt = f"""Today is {today}. Below is a conversation between a user and a
 WEBXPAY payment-gateway analytics assistant, then the user's NEW message.
@@ -4880,10 +4910,12 @@ Classify the NEW message and respond with ONLY a JSON object:
   Most questions. Also opinion/assessment questions answerable with our data plus
   general knowledge ("are we doing well?").
 - "web": the user wants EXTERNAL/public information looked up — published market or
-  industry data, competitor facts, news, whether a business still operates, named
-  sources/reports. However it is phrased: "check what's happening out there",
-  "is that number realistic vs what others are seeing right now", "find out if these
-  companies are still in business", "get me the actual published figures".
+  industry data, competitor facts, news, regulations, whether a business still
+  operates, named sources/reports. However it is phrased: "check what's happening out
+  there", "is that number realistic vs what others are seeing right now", "find out if
+  these companies are still in business", "get me the actual published figures".
+  ONLY for business-relevant external info — unrelated general trivia is NOT web
+  (see OFF-TOPIC rule: kind=meta).
 - "both": validate/compare OUR figures against external data, or research entities
   FROM our data on the web ("cross-check these numbers with the market",
   "web-search our top 10 lost merchants — worth re-onboarding?").
@@ -4934,6 +4966,16 @@ SPELLING CORRECTIONS: when the user re-supplies or corrects a name ("pramoda",
 "the name is pramoda"), the rewritten question MUST use the user's LATEST spelling
 verbatim — NEVER carry forward an earlier variant from the conversation (a previous
 failure kept searching the old misspelling "Promada" after the user corrected it).
+
+OFF-TOPIC / CASUAL MESSAGES — general trivia, jokes, personal small talk, anything
+unrelated to WEBXPAY's business, its data, or the payments industry (e.g. "what sound
+does a cat make", "tell me a joke", "who won the world cup") — are kind=meta with
+source=internal. The answer must FIRST genuinely answer it in ONE short, warm sentence
+(e.g. "Meow! 🐱"), THEN steer back in one sentence (e.g. "That one's outside my usual
+beat though — I'm your WEBXPAY analytics assistant. Want to look at GMV, revenue, or
+merchant activity?"). NEVER reply with a robotic refusal like "I can only answer
+questions related to the WEBXPAY database" — answer the small thing warmly, then
+redirect. Do NOT send unrelated trivia to source=web.
 
 VISUALIZATION REQUESTS ("present this as an infographic/chart/graph", "visualize it",
 "plot this") are kind=data, NOT meta: rewrite them as the SAME underlying data question
@@ -4993,6 +5035,10 @@ JSON:"""
         rewritten = (spec.get("question") or "").strip() or question
         # Guard against junk rewrites → keep original.
         if kind == "data" and len(rewritten) > 4 * len(question) + 200:
+            rewritten = question
+        # FIRST TURN: nothing to resolve, so never let the LLM reword the question —
+        # only its kind/source classification is used.
+        if not turns:
             rewritten = question
         answer = spec.get("answer")
         source = str(spec.get("source") or "").strip().lower()
@@ -5162,6 +5208,15 @@ def _parse_two_months(question: str):
     month_re = (r'\b(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|'
                 r'jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|'
                 r'nov(?:ember)?|dec(?:ember)?)\b')
+    # A month with an attached DAY number ("January 1, 2026, to July 8, 2026",
+    # "june 11 vs 12") is a specific date / date RANGE — ONE continuous window, not
+    # two whole months to compare. Follow-up rewrites spell out "this year" as
+    # "January 1, 2026, to July 8, 2026", which once sent a transaction-count
+    # listing into the month-mover handler. (Ordinals like "11th" are caught above;
+    # this catches the plain-number form. A 4-digit year after the month does not
+    # match \d{1,2}\b.)
+    if re.search(month_re + r'\.?,?\s+\d{1,2}\b(?!\d)', ql):
+        return None
     months_in_order = []
     for m in re.finditer(month_re, ql):
         tok = m.group(1)
@@ -5875,7 +5930,9 @@ def handle_user_question(question: str, sql_executor, history=None):
     # Decides data-vs-meta and rewrites follow-ups into standalone questions.
     # META ("why didn't you find that before", "are you sure?") is answered
     # conversationally from history and must NOT run SQL.
+    _t_interp = time.monotonic()
     _interp = interpret_followup(question, history)
+    print(f"[timing] interpret_followup {time.monotonic() - _t_interp:.1f}s", flush=True)
     if _interp.get("kind") == "meta" and _interp.get("answer"):
         # NEVER let a meta-refusal swallow a question the outlook/advisor paths can
         # actually answer ("where will webxpay be in 5 years", "are we keeping up with
@@ -5931,8 +5988,8 @@ def handle_user_question(question: str, sql_executor, history=None):
     # ── Step 0a-web: questions needing EXTERNAL information get web research ──
     # PRIMARY: the interpreter LLM classifies every question's data source by
     # MEANING (internal DB / web / both) — "check what's happening out there" works
-    # without any magic keyword. FALLBACK: the keyword patterns, for when the
-    # interpreter call failed or there was no history (first turn).
+    # without any magic keyword, and it now runs on the FIRST turn too. FALLBACK:
+    # the keyword patterns, used ONLY when the interpreter call itself failed.
     try:
         from web_research import is_web_question, handle_web_research
         _needs_web = (
@@ -6037,11 +6094,16 @@ def handle_user_question(question: str, sql_executor, history=None):
     _two_months_pre = _parse_two_months(question)
     if _two_months_pre and "onboard" not in question.lower():
         _ql_mc = question.lower()
+        # NOTE deliberately NO range words here ("less than", "between", "lower"):
+        # "merchants with less than 5 transactions between January and July" is a
+        # threshold/range question, not a month-vs-month mover one — real mover
+        # questions always carry a change/compare verb ("dropped less than 10%"
+        # still triggers via "dropped").
         _mc_words_pre = ("compare", "compared", "comparing", "comparison", "vs", "versus",
                          "drop", "dropped", "decline", "declined", "fell", "fall",
-                         "less than", "didn't transact", "didnt transact", "did not transact",
+                         "didn't transact", "didnt transact", "did not transact",
                          "stopped", "churn", "churned", "inactive", "no transaction",
-                         "lower", "decrease", "decreased", "reduction", "between")
+                         "decrease", "decreased", "reduction")
         _mc_subj_pre = ("gmv", "transact", "revenue", "sales", "value", "merchant", "volume")
         if any(w in _ql_mc for w in _mc_words_pre) and any(s in _ql_mc for s in _mc_subj_pre):
             _mc_pre = handle_month_gmv_comparison(question, sql_executor,

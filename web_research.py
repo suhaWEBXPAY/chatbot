@@ -58,11 +58,10 @@ _EXTERNAL_PAT = re.compile(
 
 # "how do we compare our first 6 months with the market growth?" — comparing OUR
 # results against the MARKET needs real published data, so it belongs here (grounded
-# search + our measured facts), not the advisor's general knowledge. This must be
-# keyword-deterministic: routing used to depend on the follow-up interpreter's LLM
-# `source` classification, which only runs when there IS history — the identical
-# question fell to the generic knowledge classifier in a fresh chat but reached web
-# research in a continued one. Internal comparisons ("compare june vs may",
+# search + our measured facts), not the advisor's general knowledge. NOTE: the
+# PRIMARY router is the interpreter LLM's `source` classification (it now runs on
+# every turn, including the first); all patterns in this file are only the outage
+# fallback for when that LLM call fails. Internal comparisons ("compare june vs may",
 # "compared to other merchants") don't mention market/industry/competitors and are
 # untouched.
 # NOTE "the market/the industry" (with article) on purpose: "industry-wise
@@ -74,10 +73,25 @@ _MARKET_COMPARE_PAT = re.compile(
     r"|\b(?:vs\.?|versus|against) the (?:market|industry|competition)\b")
 
 
+# "what are the latest CBSL regulations on payment gateways" — regulator names and
+# regulation nouns are PUBLIC information published by the regulator, never in our
+# database, so they always belong to web research. Without this the question fell to
+# the knowledge classifier, which refused it ("my capabilities are limited to querying
+# the WEBXPAY internal databases"). Internal data questions (GMV, merchants, RMs...)
+# never contain these words, so the pattern is safe to keep broad.
+_REGULATORY_PAT = re.compile(
+    r"(?i)\bcbsl\b|\bcentral bank\b|\blanka ?clear\b|\bpci[ -]?dss\b|"
+    r"\bregulat(?:ion|ions|ory|or|ors)\b|"
+    r"\b(?:directive|circular|gazette)s?\b|"
+    r"\bcompliance (?:rule|requirement|standard|guideline)s?\b|"
+    r"\bpayment (?:and settlement|systems?) act\b")
+
+
 def is_web_question(question: str) -> bool:
     q = question or ""
     return bool(_WEB_PAT.search(q) or _SOURCE_PAT.search(q)
-                or _EXTERNAL_PAT.search(q) or _MARKET_COMPARE_PAT.search(q))
+                or _EXTERNAL_PAT.search(q) or _MARKET_COMPARE_PAT.search(q)
+                or _REGULATORY_PAT.search(q))
 
 
 def _history_context(history) -> str:

@@ -4,6 +4,7 @@ from db import run_sql
 from gpt_helpers import handle_user_question, build_overview_table_row
 import json
 import os
+import time
 from datetime import datetime
 
 # Load schema
@@ -114,6 +115,7 @@ def ask():
         or os.getenv("CHATBOT_ENGINE", "").lower() == "new"
     )
 
+    _t_ask = time.monotonic()
     try:
         if uploaded_files:
             # File analysis path — the answer is grounded in the uploaded
@@ -141,6 +143,9 @@ def ask():
                 }
         else:
             payload = handle_user_question(question, run_sql, history=history)
+
+        print(f"[timing] /ask total {time.monotonic() - _t_ask:.1f}s :: "
+              f"{question[:100]!r}", flush=True)
 
         raw_result = payload.get("raw_result")
         sql_used = payload.get("sql")

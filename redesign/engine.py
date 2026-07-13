@@ -45,16 +45,47 @@ def handle_user_question_new(question: str, sql_executor, history=None):
     lane = r.get("lane", "db")
 
     if lane == "chit_chat":
+        # Greetings AND off-topic small talk ("what sound does a cat make") land here.
+        # Answer warmly in one line, then redirect — never a robotic refusal.
+        try:
+            resp = G.client.chat.completions.create(
+                model=G.CHAT_MODEL,
+                messages=[{"role": "user", "content": (
+                    "You are the WEBXPAY analytics assistant (Sri Lankan payment "
+                    "gateway). The user sent a greeting or an off-topic casual "
+                    "message. Reply in ONE short, warm sentence that genuinely "
+                    "answers it (e.g. 'Meow! 🐱' for a cat-sound question), then ONE "
+                    "sentence steering back to what you do: GMV, revenue, merchants, "
+                    "POS/IPG analytics. Never refuse robotically.\n\n"
+                    f"User message: {q}")}],
+                temperature=0.4,
+                max_tokens=120,
+                reasoning_effort="none",
+            )
+            txt = (resp.choices[0].message.content or "").strip()
+            if txt:
+                return _payload(q, answer=txt, response_type="greeting")
+        except Exception as _e:
+            print(f"[engine] chit_chat reply failed, using canned greeting: {_e}")
         return _payload(q, answer=(
             "Hello! I'm the WEBXPAY Analytics Assistant (new engine). Ask me about GMV, "
             "revenue, MDR, merchants, POS or IPG — e.g. *'IPG revenue for March 2025'*."
         ), response_type="greeting")
 
     if lane in ("web", "hybrid"):
+        # Grounded Google-Search research — same module the legacy engine uses, so
+        # "latest CBSL regulations" etc. get a real sourced answer, not a stub.
+        try:
+            from web_research import handle_web_research
+            _web = handle_web_research(q, history=history, sql_executor=sql_executor)
+            if isinstance(_web, dict) and _web.get("answer"):
+                _web["engine"] = "new"
+                return _web
+        except Exception as _e:
+            print(f"[engine] web research failed: {_e}")
         return _payload(q, answer=(
-            f"**This looks like a public/external question** ({r.get('reason','')}). "
-            "The internet lane isn't connected yet in this preview — the new engine correctly "
-            "detected it should NOT be answered from the WEBXPAY database."
+            f"**This looks like a public/external question** ({r.get('reason','')}), "
+            "but the web-research service couldn't be reached just now — please try again."
         ), response_type="web")
 
     # Month-over-month merchant mover questions have a deterministic multi-query handler
