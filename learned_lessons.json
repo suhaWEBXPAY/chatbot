@@ -1,0 +1,32 @@
+[
+  {
+    "id": "056b5bac485f",
+    "created_at": "2026-07-03T03:48:31.436109",
+    "rule": "An active merchant is defined as tbl_store.is_active = 1 AND tbl_store.free_trail = 0 (both conditions required).",
+    "source_question": "for active merchants you should check is_active = 1 and free_trail = 0"
+  },
+  {
+    "id": "a1c2e3f4d5b6",
+    "created_at": "2026-07-03T05:10:00.000000",
+    "rule": "When ranking or evaluating Relationship Manager (RM) sales/GMV/performance, ALWAYS combine approved IPG GMV and POS GMV across both channels, unless the user explicitly restricts to one channel. Always state which channels are included.",
+    "source_question": "no the above what youve given is for ipg only / now find for ipg and pos both"
+  },
+  {
+    "id": "b2577ea49984",
+    "created_at": "2026-07-03T09:51:27.302471",
+    "rule": "The exact count of POS terminals is from a different database that the system cannot access. The current data may be inaccurate because some POS machines are deactivated and then assigned a new TID. When asked about the number of POS terminals, explain this limitation.",
+    "source_question": "i want you to know that the exact count is from a differnet dtabaase and you cant access it. the one you have given may be wrong cuz there are some pos machine we deactivate and then assign a new tid so next time a user asks this u shud be able to explain this"
+  },
+  {
+    "id": "d5c0a93ddaa2",
+    "created_at": "2026-07-03T16:53:36.720397",
+    "rule": "When computing transaction GMV/activity or listing transactions, do NOT filter by tbl_store.free_trail or is_active - a transaction counts regardless of the merchants current status flags. free_trail/is_active only apply when the question is about merchant STATUS (active merchant lists/counts).",
+    "source_question": "to get transactions checking free trail is uncessar"
+  },
+  {
+    "id": "16c4c911d700",
+    "created_at": "2026-07-08T03:39:53.729153",
+    "rule": "When counting merchants onboarded, do not check the free trial status.",
+    "source_question": "how many merhcnats onboarded this year dont check free trial"
+  }
+]

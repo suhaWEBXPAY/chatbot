@@ -2,3 +2,6 @@ flask
 openai
 mysql-connector-python
 python-dotenv
+pypdf
+python-docx
+openpyxl

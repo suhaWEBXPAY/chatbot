@@ -2,3 +2,10 @@ __pycache__/
 *.pyc
 venv/
 .env
+auth_users.sqlite3
+auth_users.sqlite3-*
+summary_mart.sqlite3
+summary_mart.sqlite3-*
+query_cache.sqlite3
+server_test.log
+.claude/

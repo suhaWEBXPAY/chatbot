@@ -68,24 +68,57 @@ def _is_read_only_select(query):
 
 
 def run_sql(query):
+    query = (query or "").replace("```sql", "").replace("```", "").strip()
+    print("\n[run_sql] Executing SQL (first 500 chars):\n", query[:500], "\n")
+
+    if not _is_read_only_select(query):
+        return {"error": "Only read-only SELECT queries are allowed."}
+
+    conn = None
+    cursor = None
     try:
-        query = (query or "").replace("```sql", "").replace("```", "").strip()
-        print("\n[run_sql] Executing SQL (first 500 chars):\n", query[:500], "\n")
-
-        if not _is_read_only_select(query):
-            return {"error": "Only read-only SELECT queries are allowed."}
-
         conn = db_connect()
+        # A pooled connection can go stale between requests; revive it before use.
+        try:
+            conn.ping(reconnect=True, attempts=3, delay=1)
+        except Exception:
+            pass
         cursor = conn.cursor(dictionary=True)
+        # Hard server-side cap so a truly runaway query self-aborts instead of hanging the
+        # request forever. Generous by default (heavy analytics can legitimately take a
+        # while); override with SQL_MAX_EXECUTION_MS if needed.
+        _timeout_ms = int(os.getenv("SQL_MAX_EXECUTION_MS", "180000"))  # 3 minutes
+        try:
+            cursor.execute(f"SET SESSION MAX_EXECUTION_TIME={_timeout_ms}")
+        except Exception:
+            pass
         cursor.execute(query)
         data = cursor.fetchall()
-        cursor.close()
-        conn.close()
         return data
 
     except Exception as e:
-        print("[run_sql] SQL ERROR:", str(e))
-        return {"error": str(e)}
+        msg = str(e)
+        print("[run_sql] SQL ERROR:", msg)
+        # Friendly message when a query hits the execution-time cap.
+        if "max_execution_time" in msg.lower() or "3024" in msg or "statement execution time" in msg.lower():
+            return {"error": ("This query needs to scan a lot of data and took too long to "
+                              "finish. Try narrowing the date range (e.g. a single month), or "
+                              "ask for a summary/total instead of every row.")}
+        return {"error": msg}
+
+    finally:
+        # ALWAYS release the connection back to the pool, even on error/timeout —
+        # otherwise leaked connections exhaust the pool ("MySQL Connection not available").
+        if cursor is not None:
+            try:
+                cursor.close()
+            except Exception:
+                pass
+        if conn is not None:
+            try:
+                conn.close()   # for a pooled connection, this returns it to the pool
+            except Exception:
+                pass
 
 
 def get_columns_for_table(table_name):

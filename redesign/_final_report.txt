@@ -1,0 +1,34 @@
+Connection pool created (size=8)
+
+FLAG   LANE   TOOL                       QUESTION
+----------------------------------------------------------------------------------------------------
+
+# GMV / revenue / volume
+ADHOC  db     adhoc_sql                  what is the loss for month of december 2025   <- AI-written SQL
+
+# channel split / type
+
+# status
+
+# trend / timeseries
+
+# merchant activity
+
+# ranking
+
+# comparison / diagnosis
+DATE?  db     merchant_movers            why did GMV drop in june compared to may   <- years=['2023']
+
+# multi-step / adhoc-expected
+ADHOC  db     adhoc_sql                  did the merchants onboarded last month do any transa   <- AI-written SQL
+ADHOC  db     adhoc_sql                  merchants who signed up but never paid   <- AI-written SQL
+
+# non-db
+
+# real logged questions
+FAIL   ?      ?                          give me information from time period january 2nd to    <- Error code: 503 - [{'error': {'code': 503, 'message': 'This 
+FAIL   ?      ?                          can you provide me the IPG transactions approved and   <- Error code: 503 - [{'error': {'code': 503, 'message': 'This 
+
+====================================================================================================
+SUMMARY  total=32  OK=26  ADHOC=3  FAIL=2  DATE?=1
+FAIL = must fix. ADHOC = review whether a validated builder should cover it. DATE? = wrong/again year.
